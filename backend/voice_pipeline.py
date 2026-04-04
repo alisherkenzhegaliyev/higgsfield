@@ -31,6 +31,12 @@ COMMAND_KEYWORDS: frozenset[str] = frozenset(
         # modify / delete
         "remove", "delete", "move", "update", "edit", "rename", "change",
         "connect", "link", "arrow", "label", "clear",
+        # visual / media
+        "moodboard", "mood", "vibe", "aesthetic", "inspiration", "inspiring",
+        "image", "images", "picture", "pictures", "photo", "photos",
+        "video", "animate", "animation", "fetch", "find", "search",
+        "pinterest", "reference", "references", "visual", "visuals",
+        "illustration", "render", "portrait", "landscape",
     }
 )
 

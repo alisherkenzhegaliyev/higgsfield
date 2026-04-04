@@ -21,7 +21,7 @@ export default function AnimationPanel() {
       if (shapes.length !== 1) return null
       const shape = shapes[0]
       if (shape.type !== 'image') return null
-      const props = shape.props as Record<string, unknown>
+      const props = shape.props as unknown as Record<string, unknown>
       const assetId = props.assetId
       if (!assetId) return null
       const asset = editor.getAsset(assetId as any)
@@ -53,7 +53,7 @@ export default function AnimationPanel() {
   if (!selected || isPending) return null
 
   const rawUrl = selected.originalUrl ?? selected.src
-  const isLocal = rawUrl.startsWith('data:') || rawUrl.startsWith('blob:') || rawUrl.startsWith('http://localhost')
+  const isLocal = rawUrl.startsWith('data:') || rawUrl.startsWith('blob:')
 
   async function handleAnimate() {
     if (!selected) return
@@ -64,9 +64,8 @@ export default function AnimationPanel() {
       setUploading(true)
       try {
         // blob: URLs must be read in-browser before sending to backend
-        // Convert blob: and localhost proxy URLs to data URLs before uploading
         let dataUrl = rawUrl
-        if (rawUrl.startsWith('blob:') || rawUrl.startsWith('http://localhost')) {
+        if (rawUrl.startsWith('blob:')) {
           const blob = await fetch(rawUrl).then((r) => r.blob())
           dataUrl = await new Promise<string>((resolve) => {
             const reader = new FileReader()

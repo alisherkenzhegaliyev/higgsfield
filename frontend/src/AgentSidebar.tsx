@@ -1,11 +1,10 @@
 import { MutableRefObject, useState, useRef, useEffect, KeyboardEvent } from 'react'
-import { Editor, createShapeId, TLShapeId, toRichText } from 'tldraw'
-import { streamMessage, StreamAction } from './api'
-import { getCanvasState } from './canvasUtils'
+import { Editor, createShapeId, TLShapeId, toRichText, AssetRecordType } from 'tldraw'
+import { streamMessage, startGeneration, proxyUrl, StreamAction, CanvasShape } from './api'
+import { useGenerationContext, GenerationSettings } from './GenerationContext'
 
 interface AgentSidebarProps {
   editorRef: MutableRefObject<Editor | null>
-  applyActionRef?: MutableRefObject<((action: StreamAction) => void) | null>
 }
 
 type ChatMessage = {
@@ -14,12 +13,112 @@ type ChatMessage = {
 }
 
 
+function getCanvasState(editor: Editor): CanvasShape[] {
+  return editor.getCurrentPageShapes().map((shape) => {
+    const props = shape.props as Record<string, unknown>
+    let text = ''
+    const rawText = props.text ?? props.richText
+    if (typeof rawText === 'string') {
+      text = rawText
+    } else if (rawText && typeof rawText === 'object' && 'content' in rawText) {
+      const doc = rawText as { content?: Array<{ content?: Array<{ text?: string }> }> }
+      text = (doc.content ?? [])
+        .map((p) => (p.content ?? []).map((leaf) => leaf.text ?? '').join(''))
+        .join('\n')
+    }
+    return {
+      id: shape.id,
+      type: shape.type,
+      x: Math.round(shape.x),
+      y: Math.round(shape.y),
+      text,
+      color: (props.color as string) ?? '',
+      w: props.w as number | undefined,
+      h: props.h as number | undefined,
+      geo: props.geo as string | undefined,
+    }
+  })
+}
+
 /** Convert agent-assigned shapeId → tldraw TLShapeId */
 function agentId(id: string): TLShapeId {
   return (id.startsWith('shape:') ? id : `shape:${id}`) as TLShapeId
 }
 
-function applyAction(editor: Editor, action: StreamAction) {
+/** Find a free position near (nearX, nearY) that doesn't overlap existing shapes. */
+function findFreePosition(
+  editor: Editor,
+  nearX: number,
+  nearY: number,
+  excludeId?: TLShapeId
+): { x: number; y: number } {
+  const shapes = editor.getCurrentPageShapes().filter((s) => s.id !== excludeId)
+  const SIZE = 64
+  const offsets = [
+    [-90, -90], [0, -110], [90, -90],
+    [-110, 0], [110, 0],
+    [-90, 90], [0, 110], [90, 90],
+  ]
+  for (const [dx, dy] of offsets) {
+    const x = nearX + dx
+    const y = nearY + dy
+    const clear = shapes.every((shape) => {
+      const b = editor.getShapePageBounds(shape)
+      if (!b) return true
+      return x + SIZE < b.minX || x > b.maxX || y + SIZE < b.minY || y > b.maxY
+    })
+    if (clear) return { x, y }
+  }
+  return { x: nearX - 90, y: nearY - 110 }
+}
+
+/** Compute canvas dimensions from an aspect ratio string like "16:9" or "9:16". */
+function dimensionsFromAspectRatio(aspectRatio: string): { w: number; h: number } {
+  const [wr, hr] = aspectRatio.split(':').map(Number)
+  if (!wr || !hr) return { w: 640, h: 360 }
+  const BASE = 640
+  // portrait: fix height; landscape/square: fix width
+  if (hr > wr) return { w: Math.round(BASE * wr / hr), h: BASE }
+  return { w: BASE, h: Math.round(BASE * hr / wr) }
+}
+
+/** Move or create the persistent AI circle near the given canvas coordinates. */
+function ensureAiCircle(
+  editor: Editor,
+  circleRef: { current: TLShapeId | null },
+  nearX: number,
+  nearY: number
+) {
+  const pos = findFreePosition(editor, nearX, nearY, circleRef.current ?? undefined)
+  if (circleRef.current && editor.getShape(circleRef.current)) {
+    editor.updateShapes([{ id: circleRef.current, type: 'geo', x: pos.x, y: pos.y }])
+  } else {
+    const id = createShapeId()
+    editor.createShapes([{
+      id,
+      type: 'geo',
+      x: pos.x,
+      y: pos.y,
+      props: {
+        geo: 'ellipse' as const,
+        w: 64, h: 64,
+        richText: toRichText('AI'),
+        color: 'violet' as any,
+        fill: 'solid' as const,
+      },
+    }])
+    circleRef.current = id
+  }
+}
+
+export function applyAction(
+  editor: Editor,
+  action: StreamAction,
+  onGenerationComplete: (gen: import('./GenerationContext').PendingGeneration) => void,
+  onThinkingStart: (gen: import('./GenerationContext').ThinkingGeneration) => void,
+  onThinkingEnd: (id: string) => void,
+  settings: GenerationSettings,
+) {
   const t = action._type
 
   if (t === 'create_note') {
@@ -133,20 +232,152 @@ function applyAction(editor: Editor, action: StreamAction) {
     }
   } else if (t === 'delete_shape') {
     editor.deleteShapes([action.id as TLShapeId])
+
+  } else if (t === 'generate_image') {
+    const x = (action.x as number) ?? 200
+    const y = (action.y as number) ?? 200
+    const prompt = (action.prompt as string) ?? ''
+    const thinkingId = `thinking-img-${Date.now()}`
+    const { w, h } = dimensionsFromAspectRatio(settings.imageAspectRatio)
+
+    // Canvas placeholder — shows exactly where the image will land
+    const placeholderId = createShapeId()
+    editor.createShapes([{
+      id: placeholderId,
+      type: 'geo',
+      x, y,
+      props: {
+        geo: 'rectangle' as const,
+        w, h,
+        richText: toRichText(`Generating image…\n"${prompt.slice(0, 80)}"`),
+        color: 'violet' as any,
+        fill: 'semi' as const,
+        dash: 'dashed' as const,
+      },
+    }])
+
+    onThinkingStart({ id: thinkingId, x, y, w, h, prompt, type: 'image' })
+
+    startGeneration({
+      type: 'image', prompt, x, y,
+      model: settings.imageModel,
+      resolution: settings.imageResolution,
+      aspect_ratio: settings.imageAspectRatio,
+    }, (status) => {
+      if (status.status !== 'completed' && status.status !== 'failed') return
+      onThinkingEnd(thinkingId)
+      if (status.status === 'failed') {
+        editor.updateShapes([{
+          id: placeholderId, type: 'geo',
+          props: { richText: toRichText(`❌ Generation failed\n${status.error ?? ''}`), color: 'red' as any },
+        }])
+        return
+      }
+      editor.deleteShapes([placeholderId])
+      if (status.url) {
+        const imageId = createShapeId()
+        const assetId = AssetRecordType.createId()
+        editor.createAssets([{
+          type: 'image', id: assetId, typeName: 'asset',
+          props: { w, h, name: prompt.slice(0, 40), isAnimated: false, mimeType: 'image/png', src: proxyUrl(status.url!) },
+          meta: { originalUrl: status.url },
+        }])
+        editor.createShapes([{
+          id: imageId, type: 'image', x, y, opacity: 0.4,
+          props: { w, h, assetId, playing: false, url: '', crop: null, flipX: false, flipY: false },
+        }])
+        onGenerationComplete({
+          shapeId: imageId as unknown as string,
+          assetId: assetId as unknown as string,
+          x, y, w, h, prompt, mediaUrl: status.url, type: 'image',
+        })
+      }
+    })
+
+  } else if (t === 'generate_video') {
+    const x = (action.x as number) ?? 400
+    const y = (action.y as number) ?? 200
+    const prompt = (action.prompt as string) ?? ''
+    const sourceShapeId = action.sourceImageShapeId
+      ? agentId(action.sourceImageShapeId as string)
+      : undefined
+
+    let imageUrl: string | undefined
+    if (sourceShapeId) {
+      const srcShape = editor.getShape(sourceShapeId)
+      if (srcShape) {
+        const srcProps = srcShape.props as Record<string, unknown>
+        if (srcProps.assetId) {
+          const asset = editor.getAsset(srcProps.assetId as any)
+          if (asset?.props && 'src' in asset.props) {
+            imageUrl = asset.props.src as string
+          }
+        }
+      }
+    }
+
+    if (imageUrl) {
+      const thinkingId = `thinking-vid-${Date.now()}`
+
+      const placeholderId = createShapeId()
+      editor.createShapes([{
+        id: placeholderId,
+        type: 'geo',
+        x, y,
+        props: {
+          geo: 'rectangle' as const,
+          w: 640, h: 360,
+          richText: toRichText(`Generating video…\n"${prompt.slice(0, 80)}"`),
+          color: 'violet' as any,
+          fill: 'semi' as const,
+          dash: 'dashed' as const,
+        },
+      }])
+
+      onThinkingStart({ id: thinkingId, x, y, w: 640, h: 360, prompt, type: 'video' })
+
+      startGeneration({
+        type: 'video', prompt, x, y, image_url: imageUrl,
+        model: settings.videoModel,
+        duration: settings.videoDuration,
+      }, (status) => {
+        if (status.status !== 'completed' && status.status !== 'failed') return
+        onThinkingEnd(thinkingId)
+        if (status.status === 'failed') {
+          editor.updateShapes([{
+            id: placeholderId, type: 'geo',
+            props: { richText: toRichText(`❌ Generation failed\n${status.error ?? ''}`), color: 'red' as any },
+          }])
+          return
+        }
+        editor.deleteShapes([placeholderId])
+        if (status.url) {
+          const videoId = createShapeId()
+          const assetId = AssetRecordType.createId()
+          editor.createAssets([{
+            type: 'video', id: assetId, typeName: 'asset',
+            props: { w: 640, h: 360, name: prompt.slice(0, 40), isAnimated: true, mimeType: 'video/mp4', src: proxyUrl(status.url!) },
+            meta: { originalUrl: status.url },
+          }])
+          editor.createShapes([{
+            id: videoId, type: 'video', x, y, opacity: 0.4,
+            props: { w: 640, h: 360, assetId, playing: true, url: '' },
+          }])
+          onGenerationComplete({
+            shapeId: videoId as unknown as string,
+            assetId: assetId as unknown as string,
+            x, y, w: 640, h: 360, prompt, mediaUrl: status.url, type: 'video',
+          })
+        }
+      })
+    }
   }
   // 'message' is handled in the sidebar
 }
 
-export default function AgentSidebar({ editorRef, applyActionRef }: AgentSidebarProps) {
-  useEffect(() => {
-    if (applyActionRef) {
-      applyActionRef.current = (action: StreamAction) => {
-        console.log('[applyAction] editor:', !!editorRef.current, 'action:', action._type)
-        if (editorRef.current) applyAction(editorRef.current, action)
-      }
-    }
-  }, [applyActionRef, editorRef])
-
+export default function AgentSidebar({ editorRef }: AgentSidebarProps) {
+  const { onGenerationComplete, onThinkingStart, onThinkingEnd, settings, setSettings } = useGenerationContext()
+  const aiCircleRef = useRef<TLShapeId | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       role: 'assistant',
@@ -180,7 +411,13 @@ export default function AgentSidebar({ editorRef, applyActionRef }: AgentSidebar
           gotMessage = true
           setMessages((prev) => [...prev, { role: 'assistant', content: action.text as string }])
         } else if (editorRef.current) {
-          applyAction(editorRef.current, action)
+          // Move the AI circle to near the coordinates of whatever is being created
+          const ax = (action.x as number) ?? (action.x1 as number) ?? null
+          const ay = (action.y as number) ?? (action.y1 as number) ?? null
+          if (ax !== null && ay !== null) {
+            ensureAiCircle(editorRef.current, aiCircleRef, ax, ay)
+          }
+          applyAction(editorRef.current, action, onGenerationComplete, onThinkingStart, onThinkingEnd, settings)
         }
       },
       () => {
@@ -231,6 +468,40 @@ export default function AgentSidebar({ editorRef, applyActionRef }: AgentSidebar
           </div>
         )}
         <div ref={bottomRef} />
+      </div>
+
+      {/* ── Generation Settings ── */}
+      <div style={styles.settingsPanel}>
+        <div style={styles.settingsRow}>
+          <span style={styles.settingsIcon}>🖼</span>
+          <select style={styles.select} value={settings.imageModel} onChange={(e) => setSettings({ imageModel: e.target.value as any })}>
+            <option value="seedream">Seedream v4</option>
+            <option value="flux">Flux 2 Pro</option>
+          </select>
+          <select style={styles.select} value={settings.imageResolution} onChange={(e) => setSettings({ imageResolution: e.target.value })}>
+            <option value="1K">1K</option>
+            <option value="2K">2K</option>
+            <option value="4K">4K</option>
+          </select>
+          <select style={styles.select} value={settings.imageAspectRatio} onChange={(e) => setSettings({ imageAspectRatio: e.target.value })}>
+            <option value="16:9">16:9</option>
+            <option value="4:3">4:3</option>
+            <option value="1:1">1:1</option>
+            <option value="9:16">9:16</option>
+          </select>
+        </div>
+        <div style={styles.settingsRow}>
+          <span style={styles.settingsIcon}>🎬</span>
+          <select style={styles.select} value={settings.videoModel} onChange={(e) => setSettings({ videoModel: e.target.value as any })}>
+            <option value="dop_standard">DoP Standard</option>
+            <option value="dop_turbo">DoP Turbo</option>
+            <option value="kling">Kling 3.0</option>
+          </select>
+          <select style={styles.select} value={settings.videoDuration} onChange={(e) => setSettings({ videoDuration: Number(e.target.value) })}>
+            <option value={3}>3s</option>
+            <option value={5}>5s</option>
+          </select>
+        </div>
       </div>
 
       <div style={styles.inputArea}>
@@ -325,6 +596,37 @@ const styles: Record<string, React.CSSProperties> = {
   typing: {
     color: '#6b7280',
     fontStyle: 'italic',
+  },
+  settingsPanel: {
+    padding: '8px 12px',
+    borderTop: '1px solid #2a2a4a',
+    background: '#12172a',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '6px',
+  },
+  settingsRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+  },
+  settingsIcon: {
+    fontSize: '13px',
+    flexShrink: 0,
+    width: '18px',
+  },
+  select: {
+    flex: 1,
+    background: '#1e293b',
+    color: '#cbd5e1',
+    border: '1px solid #334155',
+    borderRadius: '6px',
+    padding: '3px 5px',
+    fontSize: '11px',
+    fontFamily: 'system-ui, sans-serif',
+    cursor: 'pointer',
+    outline: 'none',
+    minWidth: 0,
   },
   inputArea: {
     padding: '12px',
