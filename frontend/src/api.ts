@@ -13,9 +13,11 @@ export type CanvasShape = {
 // Raw action from the stream (uses _type discriminator)
 export type StreamAction = Record<string, unknown> & { _type: string }
 
+const API_BASE = (import.meta.env.VITE_API_URL ?? 'http://localhost:8000').replace(/\/$/, '')
+
 /** Proxy a Higgsfield CDN URL through the local backend to avoid CORS. */
 export function proxyUrl(url: string): string {
-  return `http://localhost:8000/api/proxy-media?url=${encodeURIComponent(url)}`
+  return `${API_BASE}/api/proxy-media?url=${encodeURIComponent(url)}`
 }
 
 export type GenerationStatus = {
@@ -33,7 +35,7 @@ export async function streamMessage(
 ): Promise<void> {
   let response: Response
   try {
-    response = await fetch('http://localhost:8000/api/chat/stream', {
+    response = await fetch(`${API_BASE}/api/chat/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message, canvas_state: canvasState }),
@@ -95,7 +97,7 @@ export async function streamMessage(
 
 /** Upload a local data/blob URL image to a public host, returns a public URL. */
 export async function uploadLocalImage(dataUrl: string): Promise<string> {
-  const res = await fetch('http://localhost:8000/api/upload-image', {
+  const res = await fetch(`${API_BASE}/api/upload-image`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ data_url: dataUrl }),
@@ -121,7 +123,7 @@ export async function startGeneration(
 ): Promise<void> {
   let res: Response
   try {
-    res = await fetch('http://localhost:8000/api/generate', {
+    res = await fetch(`${API_BASE}/api/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
@@ -142,7 +144,7 @@ export async function startGeneration(
   // Subscribe to status SSE
   let sseRes: Response
   try {
-    sseRes = await fetch(`http://localhost:8000/api/generation-status/${requestId}`)
+    sseRes = await fetch(`${API_BASE}/api/generation-status/${requestId}`)
   } catch {
     onStatusUpdate({ status: 'failed', error: 'Status stream error' })
     return

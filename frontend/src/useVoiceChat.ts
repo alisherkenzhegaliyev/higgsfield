@@ -18,9 +18,12 @@ export type VoiceChatCallbacks = {
   onCanvasSnapshot: (shapes: unknown[]) => void
 }
 
+export type CursorEntry = { x: number; y: number }
+
 type UseVoiceChatReturn = {
   users: VoiceUser[]
   transcripts: TranscriptEntry[]
+  cursors: Record<string, CursorEntry>
   isMuted: boolean
   isConnected: boolean
   isListenerActive: boolean
@@ -28,8 +31,22 @@ type UseVoiceChatReturn = {
   sendWsMessage: (msg: Record<string, unknown>) => void
 }
 
-const WS_URL = 'ws://localhost:8000/ws'
-const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }]
+const _API_BASE = (import.meta.env.VITE_API_URL ?? 'http://localhost:8000').replace(/\/$/, '')
+const WS_URL = _API_BASE.replace(/^http/, 'ws') + '/ws'
+const FALLBACK_ICE: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }]
+
+async function fetchIceServers(): Promise<RTCIceServer[]> {
+  const domain = import.meta.env.VITE_METERED_DOMAIN
+  const apiKey = import.meta.env.VITE_METERED_API_KEY
+  if (!domain || !apiKey) return FALLBACK_ICE
+  try {
+    const res = await fetch(`https://${domain}/api/v1/turn/credentials?apiKey=${apiKey}`)
+    const servers = await res.json()
+    return Array.isArray(servers) && servers.length > 0 ? servers : FALLBACK_ICE
+  } catch {
+    return FALLBACK_ICE
+  }
+}
 const MAX_TRANSCRIPTS = 20
 const CHUNK_INTERVAL_MS = 5000
 const RECORDER_WARMUP_MS = 300
@@ -41,6 +58,7 @@ export function useVoiceChat(
 ): UseVoiceChatReturn {
   const [users, setUsers] = useState<VoiceUser[]>([])
   const [transcripts, setTranscripts] = useState<TranscriptEntry[]>([])
+  const [cursors, setCursors] = useState<Record<string, CursorEntry>>({})
   const [isMuted, setIsMuted] = useState(false)
   const [isConnected, setIsConnected] = useState(false)
   const [isListenerActive, setIsListenerActive] = useState(false)
@@ -51,6 +69,10 @@ export function useVoiceChat(
   const localStreamRef = useRef<MediaStream | null>(null)
   const recorderRef = useRef<MediaRecorder | null>(null)
   const isMutedRef = useRef(false)
+  const iceServersRef = useRef<RTCIceServer[]>(FALLBACK_ICE)
+  const audioCtxRef = useRef<AudioContext | null>(null)
+  const nextPlayTimeRef = useRef(0)
+  const livekitRoomRef = useRef<any>(null)
   const speakingTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
   // Keep callbacks in a ref so the WS onmessage closure always sees the latest version.
   const callbacksRef = useRef(callbacks)
@@ -91,7 +113,7 @@ export function useVoiceChat(
 
   const createPeer = useCallback(
     (remoteUsername: string, polite: boolean): RTCPeerConnection => {
-      const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS })
+      const pc = new RTCPeerConnection({ iceServers: iceServersRef.current })
 
       localStreamRef.current?.getTracks().forEach((track) => {
         pc.addTrack(track, localStreamRef.current!)
@@ -213,12 +235,48 @@ export function useVoiceChat(
     startNewChunk()
   }, [])
 
+  // --- WebSocket audio relay (bypasses WebRTC, works across any network) ---
+  const startRelayRecorder = useCallback((stream: MediaStream, ws: WebSocket) => {
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus'
+      : 'audio/webm'
+
+    const recorder = new MediaRecorder(stream, { mimeType })
+    let initChunk: Uint8Array | null = null
+    let chunkIndex = 0
+
+    recorder.ondataavailable = (e) => {
+      if (e.data.size < 10 || ws.readyState !== WebSocket.OPEN) return
+      e.data.arrayBuffer().then((buf) => {
+        const bytes = new Uint8Array(buf)
+        if (chunkIndex === 0) {
+          initChunk = bytes // first chunk contains the WebM header
+        }
+        chunkIndex++
+        if (isMutedRef.current) return
+
+        // Prepend init segment so every chunk is independently decodable
+        const playable = chunkIndex === 1 || !initChunk
+          ? bytes
+          : new Uint8Array([...initChunk, ...bytes])
+
+        let bin = ''
+        playable.forEach((b) => (bin += String.fromCharCode(b)))
+        ws.send(JSON.stringify({ type: 'audio_relay', data: btoa(bin) }))
+      })
+    }
+
+    recorder.start(100) // 100ms timeslice
+  }, [])
+
   // --- Main WS + setup effect ---
 
   useEffect(() => {
     let cancelled = false
 
     async function setup() {
+      iceServersRef.current = await fetchIceServers()
+
       let stream: MediaStream
       try {
         stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
@@ -239,6 +297,7 @@ export function useVoiceChat(
         if (!cancelled) {
           setIsConnected(true)
           startRecorder(stream)
+          startRelayRecorder(stream, ws)
         }
       }
 
@@ -300,8 +359,34 @@ export function useVoiceChat(
           setIsListenerActive(true)
           callbacksRef.current.onAgentAction(msg.action as StreamAction)
           setTimeout(() => setIsListenerActive(false), 2000)
+        } else if (t === 'audio_relay') {
+          try {
+            const bin = atob(msg.data as string)
+            const bytes = new Uint8Array(bin.length)
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+
+            if (!audioCtxRef.current) {
+              audioCtxRef.current = new AudioContext({ latencyHint: 'interactive' })
+            }
+            const ctx = audioCtxRef.current
+            if (ctx.state === 'suspended') ctx.resume()
+
+            ctx.decodeAudioData(bytes.buffer.slice(0), (buffer) => {
+              const source = ctx.createBufferSource()
+              source.buffer = buffer
+              source.connect(ctx.destination)
+              const now = ctx.currentTime
+              // Schedule back-to-back; catch up immediately if we fall behind
+              const startAt = Math.max(now + 0.01, nextPlayTimeRef.current)
+              source.start(startAt)
+              nextPlayTimeRef.current = startAt + buffer.duration
+            })
+          } catch {}
+        } else if (t === 'cursor_move') {
+          setCursors((prev) => ({ ...prev, [msg.username as string]: { x: msg.x as number, y: msg.y as number } }))
         } else if (t === 'user_left') {
           closePeer(msg.username)
+          setCursors((prev) => { const next = { ...prev }; delete next[msg.username as string]; return next })
         }
       }
     }
@@ -322,14 +407,43 @@ export function useVoiceChat(
     }
   }, [roomId, username]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // --- LiveKit audio call ---
+  useEffect(() => {
+    let cancelled = false
+
+    async function joinLiveKit() {
+      try {
+        const _API_BASE = (import.meta.env.VITE_API_URL ?? 'http://localhost:8000').replace(/\/$/, '')
+        const res = await fetch(`${_API_BASE}/api/livekit-token?room=${roomId}&username=${encodeURIComponent(username)}`)
+        const { token, url } = await res.json()
+        if (!token || !url || cancelled) return
+
+        const { Room } = await import('livekit-client')
+        const room = new Room()
+        livekitRoomRef.current = room
+        await room.connect(url, token)
+        await room.localParticipant.setMicrophoneEnabled(true)
+      } catch (e) {
+        console.warn('[livekit] failed to connect', e)
+      }
+    }
+
+    joinLiveKit()
+
+    return () => {
+      cancelled = true
+      livekitRoomRef.current?.disconnect()
+      livekitRoomRef.current = null
+    }
+  }, [roomId, username])
+
   const toggleMute = useCallback(() => {
     const next = !isMutedRef.current
     isMutedRef.current = next
     setIsMuted(next)
-    localStreamRef.current?.getAudioTracks().forEach((t) => {
-      t.enabled = !next
-    })
+    localStreamRef.current?.getAudioTracks().forEach((t) => { t.enabled = !next })
+    livekitRoomRef.current?.localParticipant.setMicrophoneEnabled(!next)
   }, [])
 
-  return { users, transcripts, isMuted, isConnected, isListenerActive, toggleMute, sendWsMessage }
+  return { users, transcripts, cursors, isMuted, isConnected, isListenerActive, toggleMute, sendWsMessage }
 }
