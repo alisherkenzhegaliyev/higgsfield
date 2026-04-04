@@ -13,6 +13,8 @@ import httpx
 from PIL import Image
 
 from fastapi import FastAPI, WebSocket, Query, Request
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from chat_agent import router as chat_router
@@ -324,3 +326,27 @@ async def websocket_endpoint(ws: WebSocket, room_id: str, username: str):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/api/livekit-token")
+async def livekit_token(room: str, username: str):
+    from livekit.api import AccessToken, VideoGrants
+    s = get_settings()
+    token = (
+        AccessToken(s.livekit_api_key, s.livekit_api_secret)
+        .with_grants(VideoGrants(room_join=True, room=room))
+        .with_identity(username)
+        .with_name(username)
+        .to_jwt()
+    )
+    return {"token": token, "url": s.livekit_url}
+
+
+# Serve frontend build — must be last so API routes take priority
+_frontend_dist = os.path.join(os.path.dirname(__file__), "../frontend/dist")
+if os.path.isdir(_frontend_dist):
+    app.mount("/assets", StaticFiles(directory=os.path.join(_frontend_dist, "assets")), name="assets")
+
+    @app.get("/{full_path:path}")
+    def serve_spa(full_path: str):
+        return FileResponse(os.path.join(_frontend_dist, "index.html"))

@@ -7,7 +7,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     anthropic_api_key: str
-    groq_api_key: str = ""
+    groq_api_key: str
+    livekit_url: str = ""
+    livekit_api_key: str = ""
+    livekit_api_secret: str = ""
 
     canvas_agent_model: str = "claude-sonnet-4-6"
     chat_agent_model: str = "claude-sonnet-4-6"

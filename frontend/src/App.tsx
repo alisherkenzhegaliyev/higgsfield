@@ -15,6 +15,7 @@ import {
 import { useVoiceChat, VoiceChatCallbacks } from './useVoiceChat'
 import { getCanvasState } from './canvasUtils'
 import { StreamAction, proxyUrl } from './api'
+import { CursorContext } from './CursorContext'
 
 const ADJECTIVES = ['Quick', 'Bold', 'Calm', 'Dark', 'Free', 'Sharp', 'Wild', 'Cool', 'Swift', 'Bright']
 const NOUNS = ['Panda', 'Tiger', 'Eagle', 'Wolf', 'Fox', 'Bear', 'Hawk', 'Lynx', 'Otter', 'Raven']
@@ -122,12 +123,18 @@ export default function App() {
     [handleGenerateComplete, onGenerationComplete, onThinkingStart, onThinkingEnd, settings],
   )
 
+  const isApplyingRemoteRef = useRef(false)
+
   const handleCanvasRestoreFull = useCallback((snapshot: unknown) => {
     if (editorRef.current && snapshot) {
       try {
+        isApplyingRemoteRef.current = true
         editorRef.current.loadSnapshot(snapshot as Parameters<Editor['loadSnapshot']>[0])
+        // Keep suppressed long enough for the store listener's 1s debounce to pass
+        setTimeout(() => { isApplyingRemoteRef.current = false }, 1500)
       } catch (e) {
         console.warn('[canvas_restore_full] failed', e)
+        isApplyingRemoteRef.current = false
       }
     }
   }, [])
@@ -155,8 +162,23 @@ export default function App() {
     [handleAgentAction, handleCanvasRestoreFull, handleCanvasSnapshot],
   )
 
-  const { users, transcripts, isMuted, isConnected, isListenerActive, toggleMute, sendWsMessage } =
+  const { users, transcripts, cursors, isMuted, isConnected, isListenerActive, toggleMute, sendWsMessage } =
     useVoiceChat('main', username, callbacks)
+
+  // ── Cursor tracking ──────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!isConnected) return
+    let lastSent = 0
+    const handlePointerMove = (e: PointerEvent) => {
+      const now = Date.now()
+      if (now - lastSent < 50 || !editorRef.current) return
+      lastSent = now
+      const page = editorRef.current.screenToPage({ x: e.clientX, y: e.clientY })
+      sendWsMessage({ type: 'cursor_move', x: page.x, y: page.y })
+    }
+    window.addEventListener('pointermove', handlePointerMove)
+    return () => window.removeEventListener('pointermove', handlePointerMove)
+  }, [isConnected, sendWsMessage])
 
   // ── Canvas sync: debounced store listener ────────────────────────────────────
   const storeCleanupRef = useRef<(() => void) | null>(null)
@@ -165,9 +187,10 @@ export default function App() {
     let timer: ReturnType<typeof setTimeout>
 
     function syncCanvas() {
+      if (isApplyingRemoteRef.current) return
       clearTimeout(timer)
       timer = setTimeout(() => {
-        if (!editorRef.current) return
+        if (!editorRef.current || isApplyingRemoteRef.current) return
         try {
           const snapshot = editorRef.current.getSnapshot()
           sendWsMessage({ type: 'canvas_snapshot_full', snapshot })
@@ -196,6 +219,7 @@ export default function App() {
   }, [isConnected, sendWsMessage])
 
   return (
+    <CursorContext.Provider value={cursors}>
     <GenerationContext.Provider
       value={{
         pendingGenerations,
@@ -266,5 +290,6 @@ export default function App() {
         </div>
       </div>
     </GenerationContext.Provider>
+    </CursorContext.Provider>
   )
 }
