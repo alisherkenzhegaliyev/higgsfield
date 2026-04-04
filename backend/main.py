@@ -1,9 +1,10 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Any
 from agent import stream_agent
+from voice import handle_websocket
 
 app = FastAPI(title="AI Brainstorm Canvas API")
 
@@ -31,6 +32,11 @@ def chat_stream(body: ChatRequest):
             "Connection": "keep-alive",
         },
     )
+
+
+@app.websocket("/ws/{room_id}/{username}")
+async def websocket_endpoint(ws: WebSocket, room_id: str, username: str):
+    await handle_websocket(ws, room_id, username)
 
 
 @app.get("/health")
