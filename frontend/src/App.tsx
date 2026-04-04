@@ -1,18 +1,24 @@
-import { useRef, useMemo, useCallback, useEffect } from 'react'
-import { Editor } from 'tldraw'
+import { useRef, useState, useCallback, useEffect, useMemo } from 'react'
+import { Editor, TLShapeId, createShapeId, AssetRecordType } from 'tldraw'
 import CanvasPane from './CanvasPane'
-import AgentSidebar from './AgentSidebar'
+import AgentSidebar, { applyAction } from './AgentSidebar'
 import VoiceChat from './VoiceChat'
-import { StreamAction } from './api'
-import { getCanvasState } from './canvasUtils'
+import {
+  GenerationContext,
+  PendingGeneration,
+  ThinkingGeneration,
+  GenerationSettings,
+  DEFAULT_SETTINGS,
+} from './GenerationContext'
 import { useVoiceChat, VoiceChatCallbacks } from './useVoiceChat'
+import { getCanvasState } from './canvasUtils'
+import { StreamAction, proxyUrl } from './api'
 
 const ADJECTIVES = ['Quick', 'Bold', 'Calm', 'Dark', 'Free', 'Sharp', 'Wild', 'Cool', 'Swift', 'Bright']
 const NOUNS = ['Panda', 'Tiger', 'Eagle', 'Wolf', 'Fox', 'Bear', 'Hawk', 'Lynx', 'Otter', 'Raven']
 
 function getOrCreateUsername(): string {
   const key = 'vc_username'
-  // sessionStorage: per-tab so two browser tabs get different usernames
   const stored = sessionStorage.getItem(key)
   if (stored) return stored
   const name =
@@ -27,35 +33,120 @@ export default function App() {
   const editorRef = useRef<Editor | null>(null)
   const username = useMemo(() => getOrCreateUsername(), [])
 
-  // applyAction is wired up by AgentSidebar via this ref.
-  const applyActionRef = useRef<((action: StreamAction) => void) | null>(null)
+  // ── Generation state (from danik) ────────────────────────────────────────────
+  const [pendingGenerations, setPendingGenerations] = useState<PendingGeneration[]>([])
+  const [thinkingGenerations, setThinkingGenerations] = useState<ThinkingGeneration[]>([])
+  const [settings, setSettingsState] = useState<GenerationSettings>(DEFAULT_SETTINGS)
 
-  const handleAgentAction = useCallback((action: StreamAction) => {
-    applyActionRef.current?.(action)
-    // Store listener fires automatically within ~1s of any canvas change,
-    // which covers agent actions too — no need to sync manually here.
+  const setSettings = useCallback((patch: Partial<GenerationSettings>) => {
+    setSettingsState((prev) => ({ ...prev, ...patch }))
   }, [])
+
+  const onThinkingStart = useCallback((gen: ThinkingGeneration) => {
+    setThinkingGenerations((prev) => [...prev, gen])
+  }, [])
+
+  const onThinkingEnd = useCallback((id: string) => {
+    setThinkingGenerations((prev) => prev.filter((g) => g.id !== id))
+  }, [])
+
+  const onGenerationComplete = useCallback((gen: PendingGeneration) => {
+    setPendingGenerations((prev) => [...prev, gen])
+  }, [])
+
+  const onApprove = useCallback((shapeId: string, type: 'image' | 'video') => {
+    editorRef.current?.updateShapes([{ id: shapeId as TLShapeId, type, opacity: 1 }])
+    setPendingGenerations((prev) => prev.filter((g) => g.shapeId !== shapeId))
+  }, [])
+
+  const onDismiss = useCallback((shapeId: string) => {
+    editorRef.current?.deleteShapes([shapeId as TLShapeId])
+    setPendingGenerations((prev) => prev.filter((g) => g.shapeId !== shapeId))
+  }, [])
+
+  // ── Voice agent: generate_complete handler ───────────────────────────────────
+  // The backend voice agent polls Higgsfield and broadcasts generate_complete when done.
+  // We delete the grey placeholder and create the real media shape at 0.4 opacity,
+  // then push it into the approval queue so the user can Accept / Dismiss / Animate.
+  const handleGenerateComplete = useCallback(
+    (action: StreamAction) => {
+      const editor = editorRef.current
+      if (!editor) return
+      const { shapeId, url, x, y, w, h, media_type, prompt } = action as any
+      const isVideo = (media_type as string) === 'video'
+      const proxied = proxyUrl(url as string)
+
+      const placeholderId = `shape:${shapeId}` as TLShapeId
+      if (editor.getShape(placeholderId)) editor.deleteShapes([placeholderId])
+
+      const newShapeId = createShapeId()
+      const assetId = AssetRecordType.createId()
+      editor.createAssets([{
+        id: assetId, typeName: 'asset', type: isVideo ? 'video' : 'image',
+        props: {
+          src: proxied, w: w ?? 320, h: h ?? 220,
+          mimeType: isVideo ? 'video/mp4' : 'image/png',
+          name: 'generated', isAnimated: isVideo,
+        },
+        meta: { originalUrl: url },
+      }])
+      editor.createShapes([{
+        id: newShapeId, type: isVideo ? 'video' : 'image',
+        x: x ?? 200, y: y ?? 200, opacity: 0.4,
+        props: {
+          assetId, w: w ?? 320, h: h ?? 220,
+          ...(isVideo ? { playing: true, url: '' } : {}),
+        },
+      }])
+      onGenerationComplete({
+        shapeId: newShapeId as unknown as string,
+        assetId: assetId as unknown as string,
+        x: x ?? 200, y: y ?? 200, w: w ?? 320, h: h ?? 220,
+        prompt: prompt ?? '', mediaUrl: url as string,
+        type: isVideo ? 'video' : 'image',
+      })
+    },
+    [onGenerationComplete],
+  )
+
+  // ── Voice agent: general action handler ──────────────────────────────────────
+  // Routes WebSocket agent_action messages: generate_complete goes through the
+  // approval flow above; everything else reuses AgentSidebar's applyAction.
+  const handleAgentAction = useCallback(
+    (action: StreamAction) => {
+      if (action._type === 'generate_complete') {
+        handleGenerateComplete(action)
+        return
+      }
+      const editor = editorRef.current
+      if (editor) applyAction(editor, action, onGenerationComplete, onThinkingStart, onThinkingEnd, settings)
+    },
+    [handleGenerateComplete, onGenerationComplete, onThinkingStart, onThinkingEnd, settings],
+  )
 
   const handleCanvasRestoreFull = useCallback((snapshot: unknown) => {
     if (editorRef.current && snapshot) {
       try {
         editorRef.current.loadSnapshot(snapshot as Parameters<Editor['loadSnapshot']>[0])
       } catch (e) {
-        console.warn('[canvas_restore_full] loadSnapshot failed', e)
+        console.warn('[canvas_restore_full] failed', e)
       }
     }
   }, [])
 
-  const handleCanvasSnapshot = useCallback((shapes: unknown[]) => {
-    for (const shape of shapes as any[]) {
-      const actionType =
-        shape.type === 'note' ? 'create_note'
-        : shape.type === 'text' ? 'create_text'
-        : shape.type === 'arrow' ? 'create_arrow'
-        : 'create_shape'
-      handleAgentAction({ _type: actionType, shapeId: shape.id, ...shape } as StreamAction)
-    }
-  }, [handleAgentAction])
+  const handleCanvasSnapshot = useCallback(
+    (shapes: unknown[]) => {
+      for (const shape of shapes as any[]) {
+        const actionType =
+          shape.type === 'note' ? 'create_note'
+          : shape.type === 'text' ? 'create_text'
+          : shape.type === 'arrow' ? 'create_arrow'
+          : 'create_shape'
+        handleAgentAction({ _type: actionType, shapeId: shape.id, ...shape } as StreamAction)
+      }
+    },
+    [handleAgentAction],
+  )
 
   const callbacks: VoiceChatCallbacks = useMemo(
     () => ({
@@ -69,13 +160,10 @@ export default function App() {
   const { users, transcripts, isMuted, isConnected, isListenerActive, toggleMute, sendWsMessage } =
     useVoiceChat('main', username, callbacks)
 
-  // Debounced store listener: sync full tldraw snapshot + simplified shapes
-  // to backend whenever anything on the canvas changes (agent or manual).
+  // ── Canvas sync: debounced store listener ────────────────────────────────────
   const storeCleanupRef = useRef<(() => void) | null>(null)
-
   useEffect(() => {
     if (!isConnected) return
-
     let timer: ReturnType<typeof setTimeout>
 
     function syncCanvas() {
@@ -92,7 +180,6 @@ export default function App() {
       }, 1000)
     }
 
-    // Poll until the editor is mounted, then attach the store listener.
     const pollInterval = setInterval(() => {
       if (!editorRef.current) return
       clearInterval(pollInterval)
@@ -111,20 +198,34 @@ export default function App() {
   }, [isConnected, sendWsMessage])
 
   return (
-    <div style={{ display: 'flex', width: '100%', height: '100%' }}>
-      <div style={{ flex: 1, position: 'relative' }}>
-        <CanvasPane editorRef={editorRef} />
-        <VoiceChat
-          users={users}
-          transcripts={transcripts}
-          isMuted={isMuted}
-          isConnected={isConnected}
-          isListenerActive={isListenerActive}
-          toggleMute={toggleMute}
-          username={username}
-        />
+    <GenerationContext.Provider
+      value={{
+        pendingGenerations,
+        thinkingGenerations,
+        settings,
+        setSettings,
+        onGenerationComplete,
+        onThinkingStart,
+        onThinkingEnd,
+        onApprove,
+        onDismiss,
+      }}
+    >
+      <div style={{ display: 'flex', width: '100%', height: '100%' }}>
+        <div style={{ flex: 1, position: 'relative' }}>
+          <CanvasPane editorRef={editorRef} />
+          <VoiceChat
+            users={users}
+            transcripts={transcripts}
+            isMuted={isMuted}
+            isConnected={isConnected}
+            isListenerActive={isListenerActive}
+            toggleMute={toggleMute}
+            username={username}
+          />
+        </div>
+        <AgentSidebar editorRef={editorRef} />
       </div>
-      <AgentSidebar editorRef={editorRef} applyActionRef={applyActionRef} />
-    </div>
+    </GenerationContext.Provider>
   )
 }

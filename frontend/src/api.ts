@@ -13,6 +13,17 @@ export type CanvasShape = {
 // Raw action from the stream (uses _type discriminator)
 export type StreamAction = Record<string, unknown> & { _type: string }
 
+/** Proxy a Higgsfield CDN URL through the local backend to avoid CORS. */
+export function proxyUrl(url: string): string {
+  return `http://localhost:8000/api/proxy-media?url=${encodeURIComponent(url)}`
+}
+
+export type GenerationStatus = {
+  status: string
+  url?: string | null
+  error?: string
+}
+
 export async function streamMessage(
   message: string,
   canvasState: CanvasShape[],
@@ -80,4 +91,91 @@ export async function streamMessage(
   }
 
   onDone()
+}
+
+/** Upload a local data/blob URL image to a public host, returns a public URL. */
+export async function uploadLocalImage(dataUrl: string): Promise<string> {
+  const res = await fetch('http://localhost:8000/api/upload-image', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ data_url: dataUrl }),
+  })
+  const data = await res.json()
+  if (data.error) throw new Error(data.error)
+  return data.url as string
+}
+
+export async function startGeneration(
+  params: {
+    type: 'image' | 'video'
+    prompt: string
+    x: number
+    y: number
+    image_url?: string
+    model?: string
+    resolution?: string
+    aspect_ratio?: string
+    duration?: number
+  },
+  onStatusUpdate: (status: GenerationStatus) => void
+): Promise<void> {
+  let res: Response
+  try {
+    res = await fetch('http://localhost:8000/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    })
+  } catch {
+    onStatusUpdate({ status: 'failed', error: 'Network error' })
+    return
+  }
+
+  const data = await res.json()
+  if (data.error || !data.request_id) {
+    onStatusUpdate({ status: 'failed', error: data.error ?? 'Unknown error' })
+    return
+  }
+
+  const requestId = data.request_id as string
+
+  // Subscribe to status SSE
+  let sseRes: Response
+  try {
+    sseRes = await fetch(`http://localhost:8000/api/generation-status/${requestId}`)
+  } catch {
+    onStatusUpdate({ status: 'failed', error: 'Status stream error' })
+    return
+  }
+
+  const reader = sseRes.body!.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue
+        const raw = line.slice(6).trim()
+        if (!raw) continue
+
+        try {
+          const status = JSON.parse(raw) as GenerationStatus
+          onStatusUpdate(status)
+          if (status.status === 'completed' || status.status === 'failed') return
+        } catch {
+          continue
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock()
+  }
 }

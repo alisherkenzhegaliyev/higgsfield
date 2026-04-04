@@ -133,6 +133,82 @@ TOOLS: list[dict] = [
         "input_schema": {"type": "object", "properties": {}},
     },
     {
+        "name": "fetch_pinterest",
+        "description": (
+            "Search Pinterest for images matching a vibe, aesthetic, or topic. "
+            "Returns a JSON list of {url, title} objects. "
+            "Always follow with create_image actions to place ALL returned images on the canvas. "
+            "Use when users ask for moodboard, inspiration, aesthetic references, or 'images/pictures of X'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "required": ["query"],
+            "properties": {
+                "query": {"type": "string", "description": "Search query (e.g. 'dark academia aesthetic', 'minimalist coffee shop interior')"},
+                "max_results": {"type": "integer", "description": "Number of images to fetch (default 5, max 8)"},
+            },
+        },
+    },
+    {
+        "name": "create_image",
+        "description": "Place an image from a URL on the canvas. Use for Pinterest images returned by fetch_pinterest.",
+        "input_schema": {
+            "type": "object",
+            "required": ["shapeId", "url", "x", "y"],
+            "properties": {
+                "shapeId": {"type": "string"},
+                "url": {"type": "string", "description": "Image URL"},
+                "x": {"type": "number"},
+                "y": {"type": "number"},
+                "w": {"type": "number", "description": "Width px (default 300)"},
+                "h": {"type": "number", "description": "Height px (default 200)"},
+            },
+        },
+    },
+    {
+        "name": "generate_image",
+        "description": (
+            "Generate an AI image on the canvas using Higgsfield Seedream. "
+            "Creates a placeholder immediately; the real image appears in ~30-60s. "
+            "Use when users ask to generate, create, or visualize an image/photo/illustration."
+        ),
+        "input_schema": {
+            "type": "object",
+            "required": ["shapeId", "prompt", "x", "y"],
+            "properties": {
+                "shapeId": {"type": "string"},
+                "prompt": {"type": "string", "description": "Detailed, vivid image description"},
+                "x": {"type": "number"},
+                "y": {"type": "number"},
+                "w": {"type": "number", "description": "Width px (default 320)"},
+                "h": {"type": "number", "description": "Height px (default 220)"},
+                "aspect_ratio": {"type": "string", "description": "16:9 | 1:1 | 9:16 (default 16:9)"},
+            },
+        },
+    },
+    {
+        "name": "generate_video",
+        "description": (
+            "Generate an AI video from an existing image on the canvas. "
+            "Use when users want to animate an image. "
+            "Get the image_url from read_canvas (url field of an image shape)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "required": ["shapeId", "image_url", "prompt", "x", "y"],
+            "properties": {
+                "shapeId": {"type": "string"},
+                "image_url": {"type": "string", "description": "URL of the source image from canvas (url field)"},
+                "prompt": {"type": "string", "description": "Description of desired motion or camera movement"},
+                "x": {"type": "number"},
+                "y": {"type": "number"},
+                "w": {"type": "number", "description": "Width px (default 320)"},
+                "h": {"type": "number", "description": "Height px (default 220)"},
+                "duration": {"type": "integer", "description": "Duration in seconds (3 or 5)"},
+            },
+        },
+    },
+    {
         "name": "finish",
         "description": "Call when all requested actions are complete.",
         "input_schema": {
@@ -156,6 +232,8 @@ def format_canvas(canvas_state: list[dict]) -> str:
             line += f'  text: "{s["text"]}"'
         if s.get("color"):
             line += f"  color: {s['color']}"
+        if s.get("url"):
+            line += f'  url: "{s["url"]}"'
         lines.append(line)
     return "\n".join(lines)
 

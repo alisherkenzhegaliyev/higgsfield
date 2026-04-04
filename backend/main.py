@@ -35,7 +35,7 @@ async def lifespan(app: FastAPI):
 from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
 from typing import Any
-from agent import stream_agent, _detect_moodboard
+from chat_streaming import stream_agent, _detect_moodboard
 from pinterest import fetch_pinterest_images
 from higgsfield import (
     submit_image_generation, submit_flux_generation,
