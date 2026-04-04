@@ -7,3 +7,6 @@ groq
 aiosqlite
 langgraph
 pydantic-settings
+httpx[http2]
+pinscrape
+Pillow
