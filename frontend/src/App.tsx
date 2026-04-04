@@ -1,8 +1,10 @@
 import { useRef, useState, useCallback, useEffect, useMemo } from 'react'
+import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
 import { Editor, TLShapeId, createShapeId, AssetRecordType } from 'tldraw'
 import CanvasPane from './CanvasPane'
 import AgentSidebar, { applyAction } from './AgentSidebar'
 import VoiceChat from './VoiceChat'
+import HeaderBar from './HeaderBar'
 import {
   GenerationContext,
   PendingGeneration,
@@ -32,8 +34,9 @@ function getOrCreateUsername(): string {
 export default function App() {
   const editorRef = useRef<Editor | null>(null)
   const username = useMemo(() => getOrCreateUsername(), [])
+  const [sidebarOpen, setSidebarOpen] = useState(true)
 
-  // ── Generation state (from danik) ────────────────────────────────────────────
+  // ── Generation state ─────────────────────────────────────────────────────────
   const [pendingGenerations, setPendingGenerations] = useState<PendingGeneration[]>([])
   const [thinkingGenerations, setThinkingGenerations] = useState<ThinkingGeneration[]>([])
   const [settings, setSettingsState] = useState<GenerationSettings>(DEFAULT_SETTINGS)
@@ -65,9 +68,6 @@ export default function App() {
   }, [])
 
   // ── Voice agent: generate_complete handler ───────────────────────────────────
-  // The backend voice agent polls Higgsfield and broadcasts generate_complete when done.
-  // We delete the grey placeholder and create the real media shape at 0.4 opacity,
-  // then push it into the approval queue so the user can Accept / Dismiss / Animate.
   const handleGenerateComplete = useCallback(
     (action: StreamAction) => {
       const editor = editorRef.current
@@ -110,8 +110,6 @@ export default function App() {
   )
 
   // ── Voice agent: general action handler ──────────────────────────────────────
-  // Routes WebSocket agent_action messages: generate_complete goes through the
-  // approval flow above; everything else reuses AgentSidebar's applyAction.
   const handleAgentAction = useCallback(
     (action: StreamAction) => {
       if (action._type === 'generate_complete') {
@@ -211,20 +209,61 @@ export default function App() {
         onDismiss,
       }}
     >
-      <div style={{ display: 'flex', width: '100%', height: '100%' }}>
-        <div style={{ flex: 1, position: 'relative' }}>
-          <CanvasPane editorRef={editorRef} />
-          <VoiceChat
-            users={users}
-            transcripts={transcripts}
-            isMuted={isMuted}
-            isConnected={isConnected}
-            isListenerActive={isListenerActive}
-            toggleMute={toggleMute}
-            username={username}
-          />
+      <div className="h-screen w-screen flex flex-col overflow-hidden bg-background">
+        {/* Header */}
+        <HeaderBar
+          users={users}
+          username={username}
+          isConnected={isConnected}
+          isListenerActive={isListenerActive}
+          sidebarOpen={sidebarOpen}
+          onToggleSidebar={() => setSidebarOpen((v) => !v)}
+        />
+
+        {/* Body */}
+        <div className="flex-1 flex min-h-0">
+          {/* Main column: canvas + agent chat */}
+          <div className="flex-1 min-w-0">
+            <PanelGroup direction="vertical" className="h-full">
+              <Panel defaultSize={68} minSize={30}>
+                <div className="h-full p-2 pb-0">
+                  <div className="relative w-full h-full rounded-lg overflow-hidden border border-border">
+                    <CanvasPane editorRef={editorRef} />
+                  </div>
+                </div>
+              </Panel>
+
+              <PanelResizeHandle className="h-2 flex items-center justify-center group cursor-row-resize">
+                <div className="w-12 h-1 rounded-full bg-border group-hover:bg-primary/50 transition-colors" />
+              </PanelResizeHandle>
+
+              <Panel defaultSize={32} minSize={8} collapsible>
+                <AgentSidebar editorRef={editorRef} />
+              </Panel>
+            </PanelGroup>
+          </div>
+
+          {/* Right sidebar: voice + transcripts + generation settings */}
+          <div
+            className={`shrink-0 h-full transition-all duration-300 ease-in-out overflow-hidden ${
+              sidebarOpen ? 'w-80 border-l border-border' : 'w-0'
+            }`}
+          >
+            <div className="w-80 h-full">
+              <VoiceChat
+                users={users}
+                transcripts={transcripts}
+                isMuted={isMuted}
+                isConnected={isConnected}
+                isListenerActive={isListenerActive}
+                toggleMute={toggleMute}
+                username={username}
+                settings={settings}
+                setSettings={setSettings}
+              />
+            </div>
+          </div>
         </div>
-        <AgentSidebar editorRef={editorRef} />
       </div>
     </GenerationContext.Provider>
   )

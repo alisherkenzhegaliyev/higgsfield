@@ -1,17 +1,20 @@
-import type { CSSProperties } from 'react'
 import { useEditor, createShapeId, TLShapeId, toRichText, AssetRecordType, useValue } from 'tldraw'
 import { useGenerationContext, PendingGeneration, ThinkingGeneration } from './GenerationContext'
 import { startGeneration, proxyUrl } from './api'
 
-// Inject pulse animation once
-const STYLE = `@keyframes hf-pulse{0%,100%{opacity:.35}50%{opacity:1}}.hf-dot{animation:hf-pulse 1.4s ease-in-out infinite}`
-
 export default function GenerationOverlay() {
   const editor = useEditor()
-  const { pendingGenerations, thinkingGenerations, settings, onGenerationComplete, onThinkingStart, onThinkingEnd, onApprove, onDismiss } =
-    useGenerationContext()
+  const {
+    pendingGenerations,
+    thinkingGenerations,
+    settings,
+    onGenerationComplete,
+    onThinkingStart,
+    onThinkingEnd,
+    onApprove,
+    onDismiss,
+  } = useGenerationContext()
 
-  // Reactively reposition everything when camera / shapes change
   const thinkingPos = useValue(
     'thinking-positions',
     () =>
@@ -64,8 +67,10 @@ export default function GenerationOverlay() {
 
     startGeneration(
       {
-        type: 'video', prompt: `Smooth cinematic camera movement. ${gen.prompt}`,
-        x: vidX, y: vidY, image_url: gen.mediaUrl,
+        type: 'video',
+        prompt: `Smooth cinematic camera movement. ${gen.prompt}`,
+        x: vidX, y: vidY,
+        image_url: gen.mediaUrl,
         model: settings.videoModel,
         duration: settings.videoDuration,
       },
@@ -85,7 +90,10 @@ export default function GenerationOverlay() {
           const assetId = AssetRecordType.createId()
           editor.createAssets([{
             type: 'video', id: assetId, typeName: 'asset',
-            props: { w: gen.w, h: gen.h, name: gen.prompt.slice(0, 40), isAnimated: true, mimeType: 'video/mp4', src: proxyUrl(status.url!) },
+            props: {
+              w: gen.w, h: gen.h, name: gen.prompt.slice(0, 40),
+              isAnimated: true, mimeType: 'video/mp4', src: proxyUrl(status.url!),
+            },
             meta: { originalUrl: status.url },
           }])
           editor.createShapes([{
@@ -106,105 +114,60 @@ export default function GenerationOverlay() {
   if (thinkingPos.length === 0 && pendingPos.length === 0) return null
 
   return (
-    <>
-      <style>{STYLE}</style>
-      <div style={styles.root}>
+    <div className="absolute inset-0 pointer-events-none z-[300]">
 
-        {/* ── Thinking panels ── */}
-        {thinkingPos.map((gen) => (
-          <div
-            key={gen.id}
-            style={{ ...styles.panel, left: gen.vpX, top: gen.vpY - 48, transform: 'translateX(-50%)' }}
+      {/* Thinking panels */}
+      {thinkingPos.map((gen) => (
+        <div
+          key={gen.id}
+          className="absolute pointer-events-auto flex items-center gap-2 bg-background/90 border border-ai-border/50 rounded-xl px-3.5 py-1.5 shadow-lg backdrop-blur-sm whitespace-nowrap"
+          style={{ left: gen.vpX, top: gen.vpY - 48, transform: 'translateX(-50%)' }}
+        >
+          <span className="w-1.5 h-1.5 rounded-full bg-ai-border animate-hf-pulse shrink-0" />
+          <span className="text-xs text-muted-foreground font-medium">
+            {gen.type === 'image' ? '🖼' : '🎬'}&nbsp;
+            <span className="text-foreground/80">Generating {gen.type}…</span>
+          </span>
+          <span className="text-[11px] text-muted-foreground italic max-w-[200px] overflow-hidden text-ellipsis">
+            "{gen.prompt.slice(0, 48)}{gen.prompt.length > 48 ? '…' : ''}"
+          </span>
+        </div>
+      ))}
+
+      {/* Accept / Dismiss / Animate panels */}
+      {pendingPos.map((pos) => (
+        <div
+          key={pos.shapeId}
+          className="absolute pointer-events-auto flex items-center gap-2 bg-background/90 border border-ai-border/50 rounded-xl px-3.5 py-1.5 shadow-lg backdrop-blur-sm whitespace-nowrap"
+          style={{ left: pos.vpX + pos.scaledW / 2, top: pos.vpY - 48, transform: 'translateX(-50%)' }}
+        >
+          <span className="text-xs text-muted-foreground font-medium">
+            {pos.type === 'image' ? '🖼' : '🎬'}&nbsp;
+            <span className="text-ai-border">{pos.type === 'image' ? 'Image' : 'Video'} ready</span>
+          </span>
+          <button
+            onClick={() => onApprove(pos.shapeId, pos.type)}
+            className="px-3 py-1 text-xs font-semibold rounded-md bg-online/20 text-online border border-online/40 hover:bg-online/30 transition-colors"
           >
-            <span className="hf-dot" style={styles.dot} />
-            <span style={styles.label}>
-              {gen.type === 'image' ? '🖼' : '🎬'}&nbsp;
-              <span style={{ color: '#e2d9f3' }}>Generating {gen.type}…</span>
-            </span>
-            <span style={styles.promptSnippet}>"{gen.prompt.slice(0, 48)}{gen.prompt.length > 48 ? '…' : ''}"</span>
-          </div>
-        ))}
-
-        {/* ── Accept / Dismiss / Animate panels ── */}
-        {pendingPos.map((pos) => (
-          <div
-            key={pos.shapeId}
-            style={{ ...styles.panel, left: pos.vpX + pos.scaledW / 2, top: pos.vpY - 48, transform: 'translateX(-50%)' }}
+            ✓ Accept
+          </button>
+          <button
+            onClick={() => onDismiss(pos.shapeId)}
+            className="px-3 py-1 text-xs font-semibold rounded-md bg-destructive/20 text-destructive border border-destructive/40 hover:bg-destructive/30 transition-colors"
           >
-            <span style={styles.label}>
-              {pos.type === 'image' ? '🖼' : '🎬'}&nbsp;
-              <span style={{ color: '#a78bfa' }}>{pos.type === 'image' ? 'Image' : 'Video'} ready</span>
-            </span>
-            <button onClick={() => onApprove(pos.shapeId, pos.type)} style={btn('#22c55e')}>✓ Accept</button>
-            <button onClick={() => onDismiss(pos.shapeId)} style={btn('#ef4444')}>✕ Dismiss</button>
-            {pos.type === 'image' && (
-              <button onClick={() => handleAnimate(pos)} style={btn('#7c3aed')}>▶ Animate</button>
-            )}
-          </div>
-        ))}
+            ✕ Dismiss
+          </button>
+          {pos.type === 'image' && (
+            <button
+              onClick={() => handleAnimate(pos)}
+              className="px-3 py-1 text-xs font-semibold rounded-md bg-ai-border/20 text-ai-border border border-ai-border/40 hover:bg-ai-border/30 transition-colors"
+            >
+              ▶ Animate
+            </button>
+          )}
+        </div>
+      ))}
 
-      </div>
-    </>
+    </div>
   )
-}
-
-function btn(color: string): CSSProperties {
-  return {
-    background: color,
-    color: '#fff',
-    border: 'none',
-    borderRadius: '7px',
-    padding: '5px 13px',
-    fontSize: '12px',
-    fontWeight: 600,
-    cursor: 'pointer',
-    fontFamily: 'system-ui, sans-serif',
-    whiteSpace: 'nowrap',
-  }
-}
-
-const styles: Record<string, CSSProperties> = {
-  root: {
-    position: 'absolute',
-    inset: 0,
-    pointerEvents: 'none',
-    zIndex: 300,
-  },
-  panel: {
-    position: 'absolute',
-    pointerEvents: 'all',
-    display: 'flex',
-    alignItems: 'center',
-    gap: '8px',
-    background: 'rgba(10, 10, 22, 0.92)',
-    border: '1px solid rgba(124, 58, 237, 0.5)',
-    borderRadius: '12px',
-    padding: '7px 14px',
-    boxShadow: '0 4px 24px rgba(0,0,0,0.6)',
-    backdropFilter: 'blur(8px)',
-    whiteSpace: 'nowrap',
-  },
-  dot: {
-    width: '7px',
-    height: '7px',
-    borderRadius: '50%',
-    background: '#a78bfa',
-    flexShrink: 0,
-    display: 'inline-block',
-  },
-  label: {
-    fontSize: '12px',
-    color: '#6b7280',
-    fontFamily: 'system-ui, sans-serif',
-    fontWeight: 500,
-  },
-  promptSnippet: {
-    fontSize: '11px',
-    color: '#6b7280',
-    fontFamily: 'system-ui, sans-serif',
-    fontStyle: 'italic',
-    maxWidth: '200px',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-  },
 }

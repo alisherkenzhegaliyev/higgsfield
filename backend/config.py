@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     anthropic_api_key: str
-    groq_api_key: str
+    groq_api_key: str = ""
 
     canvas_agent_model: str = "claude-sonnet-4-6"
     chat_agent_model: str = "claude-sonnet-4-6"

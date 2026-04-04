@@ -1,5 +1,6 @@
 import { MutableRefObject, useState, useRef, useEffect, KeyboardEvent } from 'react'
 import { Editor, createShapeId, TLShapeId, toRichText, AssetRecordType } from 'tldraw'
+import { Send, Paperclip, Lock } from 'lucide-react'
 import { streamMessage, startGeneration, proxyUrl, StreamAction, CanvasShape } from './api'
 import { useGenerationContext, GenerationSettings } from './GenerationContext'
 
@@ -11,7 +12,6 @@ type ChatMessage = {
   role: 'user' | 'assistant'
   content: string
 }
-
 
 function getCanvasState(editor: Editor): CanvasShape[] {
   return editor.getCurrentPageShapes().map((shape) => {
@@ -40,12 +40,10 @@ function getCanvasState(editor: Editor): CanvasShape[] {
   })
 }
 
-/** Convert agent-assigned shapeId → tldraw TLShapeId */
 function agentId(id: string): TLShapeId {
   return (id.startsWith('shape:') ? id : `shape:${id}`) as TLShapeId
 }
 
-/** Find a free position near (nearX, nearY) that doesn't overlap existing shapes. */
 function findFreePosition(
   editor: Editor,
   nearX: number,
@@ -72,17 +70,14 @@ function findFreePosition(
   return { x: nearX - 90, y: nearY - 110 }
 }
 
-/** Compute canvas dimensions from an aspect ratio string like "16:9" or "9:16". */
 function dimensionsFromAspectRatio(aspectRatio: string): { w: number; h: number } {
   const [wr, hr] = aspectRatio.split(':').map(Number)
   if (!wr || !hr) return { w: 640, h: 360 }
   const BASE = 640
-  // portrait: fix height; landscape/square: fix width
   if (hr > wr) return { w: Math.round(BASE * wr / hr), h: BASE }
   return { w: BASE, h: Math.round(BASE * hr / wr) }
 }
 
-/** Move or create the persistent AI circle near the given canvas coordinates. */
 function ensureAiCircle(
   editor: Editor,
   circleRef: { current: TLShapeId | null },
@@ -192,7 +187,6 @@ export function applyAction(
       },
     }])
 
-    // Bind arrow endpoints to referenced shapes
     const bindings: Parameters<typeof editor.createBindings>[0] = []
     if (action.fromId) {
       const fromId = agentId(action.fromId as string)
@@ -240,7 +234,6 @@ export function applyAction(
     const thinkingId = `thinking-img-${Date.now()}`
     const { w, h } = dimensionsFromAspectRatio(settings.imageAspectRatio)
 
-    // Canvas placeholder — shows exactly where the image will land
     const placeholderId = createShapeId()
     editor.createShapes([{
       id: placeholderId,
@@ -376,7 +369,7 @@ export function applyAction(
 }
 
 export default function AgentSidebar({ editorRef }: AgentSidebarProps) {
-  const { onGenerationComplete, onThinkingStart, onThinkingEnd, settings, setSettings } = useGenerationContext()
+  const { onGenerationComplete, onThinkingStart, onThinkingEnd, settings } = useGenerationContext()
   const aiCircleRef = useRef<TLShapeId | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
@@ -386,10 +379,10 @@ export default function AgentSidebar({ editorRef }: AgentSidebarProps) {
   ])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
-  const bottomRef = useRef<HTMLDivElement>(null)
+  const scrollRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
   }, [messages])
 
   async function handleSend() {
@@ -411,7 +404,6 @@ export default function AgentSidebar({ editorRef }: AgentSidebarProps) {
           gotMessage = true
           setMessages((prev) => [...prev, { role: 'assistant', content: action.text as string }])
         } else if (editorRef.current) {
-          // Move the AI circle to near the coordinates of whatever is being created
           const ax = (action.x as number) ?? (action.x1 as number) ?? null
           const ay = (action.y as number) ?? (action.y1 as number) ?? null
           if (ax !== null && ay !== null) {
@@ -436,7 +428,7 @@ export default function AgentSidebar({ editorRef }: AgentSidebarProps) {
     )
   }
 
-  function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+  function handleKeyDown(e: KeyboardEvent<HTMLInputElement>) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       handleSend()
@@ -444,219 +436,74 @@ export default function AgentSidebar({ editorRef }: AgentSidebarProps) {
   }
 
   return (
-    <div style={styles.sidebar}>
-      <div style={styles.header}>
-        <span style={styles.headerDot} />
-        AI Agent
+    <div className="h-full flex flex-col bg-card border-t border-border">
+      {/* Header */}
+      <div className="flex items-center justify-between px-4 py-2 border-b border-border shrink-0">
+        <div className="flex items-center gap-2">
+          <Lock className="w-3 h-3 text-muted-foreground" />
+          <span className="text-[10px] text-muted-foreground font-medium">AI Agent — private canvas chat</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span
+            className={`w-1.5 h-1.5 rounded-full ${loading ? 'bg-ai-border animate-hf-pulse' : 'bg-muted-foreground'}`}
+          />
+          {loading && <span className="text-[10px] text-ai-border italic">thinking…</span>}
+        </div>
       </div>
 
-      <div style={styles.messages}>
+      {/* Messages */}
+      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-3 min-h-0">
         {messages.map((msg, i) => (
-          <div key={i} style={msg.role === 'user' ? styles.userMsg : styles.assistantMsg}>
-            {msg.role === 'assistant' && <div style={styles.agentLabel}>AI</div>}
-            <div style={msg.role === 'user' ? styles.userBubble : styles.assistantBubble}>
-              {msg.content}
+          <div key={i} className={`flex gap-2 ${msg.role === 'assistant' ? 'pl-1 border-l-2 border-ai-border' : 'justify-end'}`}>
+            {msg.role === 'assistant' && (
+              <div className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-semibold shrink-0 mt-0.5 bg-ai-border/20 text-ai-border">
+                ✦
+              </div>
+            )}
+            <div className={msg.role === 'assistant' ? 'min-w-0' : 'max-w-[80%]'}>
+              {msg.role === 'assistant' && (
+                <div className="flex items-baseline gap-2 mb-0.5">
+                  <span className="text-xs font-semibold text-foreground">
+                    AI Agent
+                    <span className="ml-1 text-[9px] px-1 py-0.5 rounded bg-ai-border/20 text-ai-border font-medium">AI</span>
+                  </span>
+                </div>
+              )}
+              <p
+                className={`text-xs leading-relaxed whitespace-pre-wrap break-words ${
+                  msg.role === 'assistant' ? 'text-secondary-foreground' : 'text-foreground bg-secondary rounded-lg px-3 py-2'
+                }`}
+              >
+                {msg.content}
+              </p>
             </div>
           </div>
         ))}
-        {loading && (
-          <div style={styles.assistantMsg}>
-            <div style={styles.agentLabel}>AI</div>
-            <div style={styles.assistantBubble}>
-              <span style={styles.typing}>thinking…</span>
-            </div>
-          </div>
-        )}
-        <div ref={bottomRef} />
       </div>
 
-      {/* ── Generation Settings ── */}
-      <div style={styles.settingsPanel}>
-        <div style={styles.settingsRow}>
-          <span style={styles.settingsIcon}>🖼</span>
-          <select style={styles.select} value={settings.imageModel} onChange={(e) => setSettings({ imageModel: e.target.value as any })}>
-            <option value="seedream">Seedream v4</option>
-            <option value="flux">Flux 2 Pro</option>
-          </select>
-          <select style={styles.select} value={settings.imageResolution} onChange={(e) => setSettings({ imageResolution: e.target.value })}>
-            <option value="1K">1K</option>
-            <option value="2K">2K</option>
-            <option value="4K">4K</option>
-          </select>
-          <select style={styles.select} value={settings.imageAspectRatio} onChange={(e) => setSettings({ imageAspectRatio: e.target.value })}>
-            <option value="16:9">16:9</option>
-            <option value="4:3">4:3</option>
-            <option value="1:1">1:1</option>
-            <option value="9:16">9:16</option>
-          </select>
+      {/* Input bar */}
+      <div className="px-4 pb-3 pt-2 shrink-0">
+        <div className="flex items-center gap-2 bg-secondary rounded-lg px-3 py-2">
+          <button className="text-muted-foreground hover:text-foreground transition-colors">
+            <Paperclip className="w-4 h-4" />
+          </button>
+          <input
+            className="flex-1 bg-transparent text-xs text-foreground placeholder:text-muted-foreground outline-none"
+            placeholder="Ask the AI agent… (Enter to send)"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={handleKeyDown}
+            disabled={loading}
+          />
+          <button
+            onClick={handleSend}
+            disabled={loading || !input.trim()}
+            className="text-primary hover:text-primary/80 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <Send className="w-4 h-4" />
+          </button>
         </div>
-        <div style={styles.settingsRow}>
-          <span style={styles.settingsIcon}>🎬</span>
-          <select style={styles.select} value={settings.videoModel} onChange={(e) => setSettings({ videoModel: e.target.value as any })}>
-            <option value="dop_standard">DoP Standard</option>
-            <option value="dop_turbo">DoP Turbo</option>
-            <option value="kling">Kling 3.0</option>
-          </select>
-          <select style={styles.select} value={settings.videoDuration} onChange={(e) => setSettings({ videoDuration: Number(e.target.value) })}>
-            <option value={3}>3s</option>
-            <option value={5}>5s</option>
-          </select>
-        </div>
-      </div>
-
-      <div style={styles.inputArea}>
-        <textarea
-          style={styles.textarea}
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder="Ask the agent… (Enter to send)"
-          rows={3}
-          disabled={loading}
-        />
-        <button style={styles.button} onClick={handleSend} disabled={loading || !input.trim()}>
-          Send
-        </button>
       </div>
     </div>
   )
-}
-
-const styles: Record<string, React.CSSProperties> = {
-  sidebar: {
-    width: '320px',
-    height: '100%',
-    background: '#1a1a2e',
-    display: 'flex',
-    flexDirection: 'column',
-    borderLeft: '1px solid #2a2a4a',
-    fontFamily: 'system-ui, sans-serif',
-    color: '#e0e0f0',
-  },
-  header: {
-    padding: '14px 16px',
-    borderBottom: '1px solid #2a2a4a',
-    fontWeight: 600,
-    fontSize: '14px',
-    display: 'flex',
-    alignItems: 'center',
-    gap: '8px',
-    background: '#16213e',
-  },
-  headerDot: {
-    width: '8px',
-    height: '8px',
-    borderRadius: '50%',
-    background: '#4ade80',
-    display: 'inline-block',
-  },
-  messages: {
-    flex: 1,
-    overflowY: 'auto',
-    padding: '12px',
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '10px',
-  },
-  userMsg: {
-    display: 'flex',
-    justifyContent: 'flex-end',
-  },
-  assistantMsg: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '4px',
-  },
-  agentLabel: {
-    fontSize: '10px',
-    color: '#6b7280',
-    textTransform: 'uppercase',
-    letterSpacing: '0.05em',
-  },
-  userBubble: {
-    background: '#4f46e5',
-    color: '#fff',
-    borderRadius: '12px 12px 2px 12px',
-    padding: '8px 12px',
-    maxWidth: '80%',
-    fontSize: '13px',
-    lineHeight: '1.5',
-    wordBreak: 'break-word',
-  },
-  assistantBubble: {
-    background: '#1e293b',
-    color: '#cbd5e1',
-    borderRadius: '2px 12px 12px 12px',
-    padding: '8px 12px',
-    maxWidth: '95%',
-    fontSize: '13px',
-    lineHeight: '1.5',
-    wordBreak: 'break-word',
-  },
-  typing: {
-    color: '#6b7280',
-    fontStyle: 'italic',
-  },
-  settingsPanel: {
-    padding: '8px 12px',
-    borderTop: '1px solid #2a2a4a',
-    background: '#12172a',
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '6px',
-  },
-  settingsRow: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '6px',
-  },
-  settingsIcon: {
-    fontSize: '13px',
-    flexShrink: 0,
-    width: '18px',
-  },
-  select: {
-    flex: 1,
-    background: '#1e293b',
-    color: '#cbd5e1',
-    border: '1px solid #334155',
-    borderRadius: '6px',
-    padding: '3px 5px',
-    fontSize: '11px',
-    fontFamily: 'system-ui, sans-serif',
-    cursor: 'pointer',
-    outline: 'none',
-    minWidth: 0,
-  },
-  inputArea: {
-    padding: '12px',
-    borderTop: '1px solid #2a2a4a',
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '8px',
-    background: '#16213e',
-  },
-  textarea: {
-    background: '#0f172a',
-    color: '#e0e0f0',
-    border: '1px solid #334155',
-    borderRadius: '8px',
-    padding: '8px 10px',
-    fontSize: '13px',
-    resize: 'none',
-    outline: 'none',
-    fontFamily: 'inherit',
-    lineHeight: '1.5',
-  },
-  button: {
-    background: '#4f46e5',
-    color: '#fff',
-    border: 'none',
-    borderRadius: '8px',
-    padding: '8px 0',
-    fontSize: '13px',
-    fontWeight: 600,
-    cursor: 'pointer',
-    opacity: 1,
-  },
 }
