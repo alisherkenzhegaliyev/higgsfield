@@ -124,12 +124,18 @@ export default function App() {
     [handleGenerateComplete, onGenerationComplete, onThinkingStart, onThinkingEnd, settings],
   )
 
+  const isApplyingRemoteRef = useRef(false)
+
   const handleCanvasRestoreFull = useCallback((snapshot: unknown) => {
     if (editorRef.current && snapshot) {
       try {
+        isApplyingRemoteRef.current = true
         editorRef.current.loadSnapshot(snapshot as Parameters<Editor['loadSnapshot']>[0])
+        // Keep suppressed long enough for the store listener's 1s debounce to pass
+        setTimeout(() => { isApplyingRemoteRef.current = false }, 1500)
       } catch (e) {
         console.warn('[canvas_restore_full] failed', e)
+        isApplyingRemoteRef.current = false
       }
     }
   }, [])
@@ -167,9 +173,10 @@ export default function App() {
     let timer: ReturnType<typeof setTimeout>
 
     function syncCanvas() {
+      if (isApplyingRemoteRef.current) return
       clearTimeout(timer)
       timer = setTimeout(() => {
-        if (!editorRef.current) return
+        if (!editorRef.current || isApplyingRemoteRef.current) return
         try {
           const snapshot = editorRef.current.getSnapshot()
           sendWsMessage({ type: 'canvas_snapshot_full', snapshot })

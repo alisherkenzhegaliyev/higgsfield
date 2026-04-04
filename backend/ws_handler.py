@@ -69,15 +69,25 @@ async def _dispatch(
         if audio_b64:
             asyncio.create_task(handle_audio_chunk(room_id, username, audio_b64))
 
+    # --- Real-time audio relay (bypasses WebRTC) ---
+    elif t == "audio_relay":
+        await room_manager.broadcast(room_id, msg, exclude=username)
+
     # --- Canvas state (simplified shapes for AI context) ---
     elif t == "canvas_state":
         room_manager.set_canvas(room_id, msg.get("state", []))
 
-    # --- Full tldraw snapshot (for perfect restore on join) ---
+    # --- Full tldraw snapshot (for perfect restore on join + live sync) ---
     elif t == "canvas_snapshot_full":
         snapshot = msg.get("snapshot")
         if snapshot:
             room_manager.set_canvas_snapshot(room_id, snapshot)
+            # Broadcast to everyone else so their canvas stays in sync
+            await room_manager.broadcast(
+                room_id,
+                {"type": "canvas_restore_full", "snapshot": snapshot},
+                exclude=username,
+            )
 
     # --- HITL confirmation response ---
     elif t == "confirm_response":
