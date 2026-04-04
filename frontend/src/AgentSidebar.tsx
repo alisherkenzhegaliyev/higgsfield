@@ -3,6 +3,11 @@ import { Editor, createShapeId, TLShapeId, toRichText, AssetRecordType } from 't
 import { streamMessage, startGeneration, proxyUrl, StreamAction, CanvasShape } from './api'
 import { useGenerationContext, GenerationSettings } from './GenerationContext'
 
+const TRIGGER_KEYWORDS = [
+  'moodboard', 'mood board', 'inspiration', 'aesthetic',
+  'vibe', 'pinterest', 'references', 'visual style',
+]
+
 interface AgentSidebarProps {
   editorRef: MutableRefObject<Editor | null>
 }
@@ -230,6 +235,36 @@ export function applyAction(
     if (shape) {
       editor.updateShapes([{ id: shape.id, type: shape.type, props: { richText: toRichText(action.text as string) } } as any])
     }
+  } else if (t === 'create_image') {
+    const id = action.shapeId ? agentId(action.shapeId as string) : createShapeId()
+    const rawUrl = action.url as string
+    const proxyUrl = `http://localhost:8000/api/proxy-image?url=${encodeURIComponent(rawUrl)}`
+    const w = (action.w as number) ?? 160
+    const h = (action.h as number) ?? 200
+
+    const assetId = AssetRecordType.createId()
+    editor.createAssets([{
+      id: assetId,
+      type: 'image',
+      typeName: 'asset',
+      props: {
+        name: 'pinterest-image',
+        src: proxyUrl,
+        w,
+        h,
+        mimeType: 'image/jpeg',
+        isAnimated: false,
+      },
+      meta: {},
+    }])
+    editor.createShapes([{
+      id,
+      type: 'image',
+      x: action.x as number,
+      y: action.y as number,
+      props: { assetId, w, h },
+    }])
+
   } else if (t === 'delete_shape') {
     editor.deleteShapes([action.id as TLShapeId])
 
@@ -381,12 +416,116 @@ export default function AgentSidebar({ editorRef }: AgentSidebarProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       role: 'assistant',
-      content: "Hi! I'm your AI brainstorm partner. Tell me what to add to the canvas — I can create sticky notes, shapes, move things around, and help organize ideas.",
+      content: "Hi! I'm your AI brainstorm partner. Chat with me, or just drop a sticky note on the canvas with words like \"moodboard\", \"inspiration\", or \"aesthetic\" — I'll automatically fetch images for you.",
     },
   ])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
+  const loadingRef = useRef(false)
+  // shapeId → text that was last successfully triggered (prevents duplicate fires)
+  const triggeredShapes = useRef<Map<string, string>>(new Map())
+  // Stable ref so the store listener always closes over the latest trigger fn
+  const autoTriggerRef = useRef<(text: string, shapeId: TLShapeId) => void>(() => {})
+
+  useEffect(() => { loadingRef.current = loading }, [loading])
+
+  // Rebuild autoTriggerRef on every render so it always sees fresh state/refs
+  useEffect(() => {
+    autoTriggerRef.current = async (text: string, shapeId: TLShapeId) => {
+      if (loadingRef.current || !editorRef.current) return
+      triggeredShapes.current.set(shapeId, text)
+      setMessages((prev) => [
+        ...prev,
+        { role: 'assistant', content: `Spotted "${text.trim()}" — pulling images…` },
+      ])
+      setLoading(true)
+      const canvasState = getCanvasState(editorRef.current)
+      let gotMessage = false
+      await streamMessage(
+        text,
+        canvasState,
+        (action) => {
+          if (action._type === 'message') {
+            gotMessage = true
+            setMessages((prev) => [...prev, { role: 'assistant', content: action.text as string }])
+          } else if (editorRef.current) {
+            applyAction(editorRef.current, action)
+          }
+        },
+        () => {
+          if (!gotMessage) setMessages((prev) => [...prev, { role: 'assistant', content: 'Done!' }])
+          setLoading(false)
+        },
+        (err) => {
+          setMessages((prev) => [...prev, { role: 'assistant', content: `Error: ${err.message}` }])
+          setLoading(false)
+        }
+      )
+    }
+  })
+
+  // Proactive canvas watcher.
+  // Trigger condition: user STOPS editing a note (editingShapeId: someId → null)
+  // AND the final text contains a trigger keyword AND it's new content since last fire.
+  // This is the correct "blur" signal — no debounce, no mid-typing false positives.
+  useEffect(() => {
+    let unsubscribe: (() => void) | null = null
+
+    function extractNoteText(editor: Editor, shapeId: TLShapeId): string {
+      const shape = editor.getShape(shapeId)
+      if (!shape || shape.type !== 'note') return ''
+      const props = shape.props as unknown as Record<string, unknown>
+      const raw = props.richText ?? props.text
+      if (typeof raw === 'string') return raw
+      if (raw && typeof raw === 'object' && 'content' in raw) {
+        const doc = raw as { content?: Array<{ content?: Array<{ text?: string }> }> }
+        return (doc.content ?? [])
+          .map((p) => (p.content ?? []).map((leaf) => leaf.text ?? '').join(''))
+          .join('\n')
+      }
+      return ''
+    }
+
+    function hasTrigger(text: string): boolean {
+      const lower = text.toLowerCase()
+      return TRIGGER_KEYWORDS.some((kw) => lower.includes(kw))
+    }
+
+    const interval = setInterval(() => {
+      const editor = editorRef.current
+      if (!editor) return
+      clearInterval(interval)
+
+      unsubscribe = editor.store.listen((entry) => {
+        for (const [, [prev, next]] of Object.entries(entry.changes.updated)) {
+          const p = prev as unknown as Record<string, unknown>
+          const n = next as unknown as Record<string, unknown>
+          // Only care about page-state records that track the active editing shape
+          if (n.typeName !== 'instance_page_state') continue
+
+          const prevEditing = p.editingShapeId as TLShapeId | null
+          const nextEditing = n.editingShapeId as TLShapeId | null
+
+          // Fire only on the transition: was editing something → now editing nothing
+          if (!prevEditing || nextEditing) continue
+
+          const text = extractNoteText(editor, prevEditing)
+          if (!hasTrigger(text)) continue
+
+          // Skip if we already fired for this exact content
+          if (triggeredShapes.current.get(prevEditing) === text) continue
+
+          autoTriggerRef.current(text, prevEditing)
+        }
+      }, { scope: 'session', source: 'user' })
+    }, 200)
+
+    return () => {
+      clearInterval(interval)
+      unsubscribe?.()
+    }
+  }, [editorRef])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })

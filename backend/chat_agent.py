@@ -16,7 +16,9 @@ from pydantic import BaseModel
 
 from agent.prompts import ACTION_SCHEMA, CHAT_AGENT_SYSTEM
 from agent.tools import format_canvas
+from chat_streaming import _detect_moodboard, stream_agent
 from config import get_settings
+from pinterest import fetch_pinterest_images
 
 logger = logging.getLogger(__name__)
 
@@ -134,8 +136,17 @@ class ChatRequest(BaseModel):
 
 @router.post("/api/chat/stream")
 def chat_stream(body: ChatRequest):
+    pinterest_images = []
+    if _detect_moodboard(body.message):
+        pinterest_images = fetch_pinterest_images(body.message, max_results=5)
+
+    generator = (
+        stream_agent(body.message, body.canvas_state, pinterest_images)
+        if pinterest_images
+        else _stream_agent(body.message, body.canvas_state)
+    )
     return StreamingResponse(
-        _stream_agent(body.message, body.canvas_state),
+        generator,
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",
