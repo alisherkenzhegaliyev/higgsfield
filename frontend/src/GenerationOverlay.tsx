@@ -8,7 +8,7 @@ const STYLE = `@keyframes hf-pulse{0%,100%{opacity:.35}50%{opacity:1}}.hf-dot{an
 
 export default function GenerationOverlay() {
   const editor = useEditor()
-  const { pendingGenerations, thinkingGenerations, onGenerationComplete, onThinkingStart, onThinkingEnd, onApprove, onDismiss } =
+  const { pendingGenerations, thinkingGenerations, settings, onGenerationComplete, onThinkingStart, onThinkingEnd, onApprove, onDismiss } =
     useGenerationContext()
 
   // Reactively reposition everything when camera / shapes change
@@ -63,18 +63,30 @@ export default function GenerationOverlay() {
     onThinkingStart({ id: thinkingId, x: vidX, y: vidY, w: gen.w, h: gen.h, prompt: gen.prompt, type: 'video' })
 
     startGeneration(
-      { type: 'video', prompt: `Smooth cinematic camera movement. ${gen.prompt}`, x: vidX, y: vidY, image_url: gen.mediaUrl },
+      {
+        type: 'video', prompt: `Smooth cinematic camera movement. ${gen.prompt}`,
+        x: vidX, y: vidY, image_url: gen.mediaUrl,
+        model: settings.videoModel,
+        duration: settings.videoDuration,
+      },
       (status) => {
         if (status.status !== 'completed' && status.status !== 'failed') return
         onThinkingEnd(thinkingId)
+        if (status.status === 'failed') {
+          editor.updateShapes([{
+            id: placeholderId, type: 'geo',
+            props: { richText: toRichText(`❌ Video failed\n${status.error ?? ''}`), color: 'red' as any },
+          }])
+          return
+        }
         editor.deleteShapes([placeholderId])
-        if (status.status === 'completed' && status.url) {
+        if (status.url) {
           const videoId = createShapeId()
           const assetId = AssetRecordType.createId()
           editor.createAssets([{
             type: 'video', id: assetId, typeName: 'asset',
             props: { w: gen.w, h: gen.h, name: gen.prompt.slice(0, 40), isAnimated: true, mimeType: 'video/mp4', src: proxyUrl(status.url!) },
-            meta: {},
+            meta: { originalUrl: status.url },
           }])
           editor.createShapes([{
             id: videoId, type: 'video', x: vidX, y: vidY, opacity: 0.4,

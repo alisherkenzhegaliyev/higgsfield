@@ -2,12 +2,17 @@ import { useRef, useState, useCallback } from 'react'
 import { Editor, TLShapeId } from 'tldraw'
 import CanvasPane from './CanvasPane'
 import AgentSidebar from './AgentSidebar'
-import { GenerationContext, PendingGeneration, ThinkingGeneration } from './GenerationContext'
+import { GenerationContext, PendingGeneration, ThinkingGeneration, GenerationSettings, DEFAULT_SETTINGS } from './GenerationContext'
 
 export default function App() {
   const editorRef = useRef<Editor | null>(null)
   const [pendingGenerations, setPendingGenerations] = useState<PendingGeneration[]>([])
   const [thinkingGenerations, setThinkingGenerations] = useState<ThinkingGeneration[]>([])
+  const [settings, setSettingsState] = useState<GenerationSettings>(DEFAULT_SETTINGS)
+
+  const setSettings = useCallback((patch: Partial<GenerationSettings>) => {
+    setSettingsState((prev) => ({ ...prev, ...patch }))
+  }, [])
 
   const onThinkingStart = useCallback((gen: ThinkingGeneration) => {
     setThinkingGenerations((prev) => [...prev, gen])
@@ -33,7 +38,7 @@ export default function App() {
 
   return (
     <GenerationContext.Provider
-      value={{ pendingGenerations, thinkingGenerations, onGenerationComplete, onThinkingStart, onThinkingEnd, onApprove, onDismiss }}
+      value={{ pendingGenerations, thinkingGenerations, settings, setSettings, onGenerationComplete, onThinkingStart, onThinkingEnd, onApprove, onDismiss }}
     >
       <div style={{ display: 'flex', width: '100%', height: '100%' }}>
         <div style={{ flex: 1, position: 'relative' }}>

@@ -93,8 +93,30 @@ export async function streamMessage(
   onDone()
 }
 
+/** Upload a local data/blob URL image to a public host, returns a public URL. */
+export async function uploadLocalImage(dataUrl: string): Promise<string> {
+  const res = await fetch('http://localhost:8000/api/upload-image', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ data_url: dataUrl }),
+  })
+  const data = await res.json()
+  if (data.error) throw new Error(data.error)
+  return data.url as string
+}
+
 export async function startGeneration(
-  params: { type: 'image' | 'video'; prompt: string; x: number; y: number; image_url?: string },
+  params: {
+    type: 'image' | 'video'
+    prompt: string
+    x: number
+    y: number
+    image_url?: string
+    model?: string
+    resolution?: string
+    aspect_ratio?: string
+    duration?: number
+  },
   onStatusUpdate: (status: GenerationStatus) => void
 ): Promise<void> {
   let res: Response

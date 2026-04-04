@@ -1,7 +1,7 @@
 import { MutableRefObject, useState, useRef, useEffect, KeyboardEvent } from 'react'
 import { Editor, createShapeId, TLShapeId, toRichText, AssetRecordType } from 'tldraw'
 import { streamMessage, startGeneration, proxyUrl, StreamAction, CanvasShape } from './api'
-import { useGenerationContext } from './GenerationContext'
+import { useGenerationContext, GenerationSettings } from './GenerationContext'
 
 interface AgentSidebarProps {
   editorRef: MutableRefObject<Editor | null>
@@ -72,6 +72,16 @@ function findFreePosition(
   return { x: nearX - 90, y: nearY - 110 }
 }
 
+/** Compute canvas dimensions from an aspect ratio string like "16:9" or "9:16". */
+function dimensionsFromAspectRatio(aspectRatio: string): { w: number; h: number } {
+  const [wr, hr] = aspectRatio.split(':').map(Number)
+  if (!wr || !hr) return { w: 640, h: 360 }
+  const BASE = 640
+  // portrait: fix height; landscape/square: fix width
+  if (hr > wr) return { w: Math.round(BASE * wr / hr), h: BASE }
+  return { w: BASE, h: Math.round(BASE * hr / wr) }
+}
+
 /** Move or create the persistent AI circle near the given canvas coordinates. */
 function ensureAiCircle(
   editor: Editor,
@@ -107,6 +117,7 @@ function applyAction(
   onGenerationComplete: (gen: import('./GenerationContext').PendingGeneration) => void,
   onThinkingStart: (gen: import('./GenerationContext').ThinkingGeneration) => void,
   onThinkingEnd: (id: string) => void,
+  settings: GenerationSettings,
 ) {
   const t = action._type
 
@@ -227,6 +238,7 @@ function applyAction(
     const y = (action.y as number) ?? 200
     const prompt = (action.prompt as string) ?? ''
     const thinkingId = `thinking-img-${Date.now()}`
+    const { w, h } = dimensionsFromAspectRatio(settings.imageAspectRatio)
 
     // Canvas placeholder — shows exactly where the image will land
     const placeholderId = createShapeId()
@@ -236,7 +248,7 @@ function applyAction(
       x, y,
       props: {
         geo: 'rectangle' as const,
-        w: 640, h: 360,
+        w, h,
         richText: toRichText(`Generating image…\n"${prompt.slice(0, 80)}"`),
         color: 'violet' as any,
         fill: 'semi' as const,
@@ -244,28 +256,40 @@ function applyAction(
       },
     }])
 
-    onThinkingStart({ id: thinkingId, x, y, w: 640, h: 360, prompt, type: 'image' })
+    onThinkingStart({ id: thinkingId, x, y, w, h, prompt, type: 'image' })
 
-    startGeneration({ type: 'image', prompt, x, y }, (status) => {
+    startGeneration({
+      type: 'image', prompt, x, y,
+      model: settings.imageModel,
+      resolution: settings.imageResolution,
+      aspect_ratio: settings.imageAspectRatio,
+    }, (status) => {
       if (status.status !== 'completed' && status.status !== 'failed') return
       onThinkingEnd(thinkingId)
+      if (status.status === 'failed') {
+        editor.updateShapes([{
+          id: placeholderId, type: 'geo',
+          props: { richText: toRichText(`❌ Generation failed\n${status.error ?? ''}`), color: 'red' as any },
+        }])
+        return
+      }
       editor.deleteShapes([placeholderId])
-      if (status.status === 'completed' && status.url) {
+      if (status.url) {
         const imageId = createShapeId()
         const assetId = AssetRecordType.createId()
         editor.createAssets([{
           type: 'image', id: assetId, typeName: 'asset',
-          props: { w: 640, h: 360, name: prompt.slice(0, 40), isAnimated: false, mimeType: 'image/png', src: proxyUrl(status.url!) },
-          meta: {},
+          props: { w, h, name: prompt.slice(0, 40), isAnimated: false, mimeType: 'image/png', src: proxyUrl(status.url!) },
+          meta: { originalUrl: status.url },
         }])
         editor.createShapes([{
           id: imageId, type: 'image', x, y, opacity: 0.4,
-          props: { w: 640, h: 360, assetId, playing: false, url: '', crop: null, flipX: false, flipY: false },
+          props: { w, h, assetId, playing: false, url: '', crop: null, flipX: false, flipY: false },
         }])
         onGenerationComplete({
           shapeId: imageId as unknown as string,
           assetId: assetId as unknown as string,
-          x, y, w: 640, h: 360, prompt, mediaUrl: status.url, type: 'image',
+          x, y, w, h, prompt, mediaUrl: status.url, type: 'image',
         })
       }
     })
@@ -312,17 +336,28 @@ function applyAction(
 
       onThinkingStart({ id: thinkingId, x, y, w: 640, h: 360, prompt, type: 'video' })
 
-      startGeneration({ type: 'video', prompt, x, y, image_url: imageUrl }, (status) => {
+      startGeneration({
+        type: 'video', prompt, x, y, image_url: imageUrl,
+        model: settings.videoModel,
+        duration: settings.videoDuration,
+      }, (status) => {
         if (status.status !== 'completed' && status.status !== 'failed') return
         onThinkingEnd(thinkingId)
+        if (status.status === 'failed') {
+          editor.updateShapes([{
+            id: placeholderId, type: 'geo',
+            props: { richText: toRichText(`❌ Generation failed\n${status.error ?? ''}`), color: 'red' as any },
+          }])
+          return
+        }
         editor.deleteShapes([placeholderId])
-        if (status.status === 'completed' && status.url) {
+        if (status.url) {
           const videoId = createShapeId()
           const assetId = AssetRecordType.createId()
           editor.createAssets([{
             type: 'video', id: assetId, typeName: 'asset',
             props: { w: 640, h: 360, name: prompt.slice(0, 40), isAnimated: true, mimeType: 'video/mp4', src: proxyUrl(status.url!) },
-            meta: {},
+            meta: { originalUrl: status.url },
           }])
           editor.createShapes([{
             id: videoId, type: 'video', x, y, opacity: 0.4,
@@ -341,7 +376,7 @@ function applyAction(
 }
 
 export default function AgentSidebar({ editorRef }: AgentSidebarProps) {
-  const { onGenerationComplete, onThinkingStart, onThinkingEnd } = useGenerationContext()
+  const { onGenerationComplete, onThinkingStart, onThinkingEnd, settings, setSettings } = useGenerationContext()
   const aiCircleRef = useRef<TLShapeId | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
@@ -382,7 +417,7 @@ export default function AgentSidebar({ editorRef }: AgentSidebarProps) {
           if (ax !== null && ay !== null) {
             ensureAiCircle(editorRef.current, aiCircleRef, ax, ay)
           }
-          applyAction(editorRef.current, action, onGenerationComplete, onThinkingStart, onThinkingEnd)
+          applyAction(editorRef.current, action, onGenerationComplete, onThinkingStart, onThinkingEnd, settings)
         }
       },
       () => {
@@ -433,6 +468,40 @@ export default function AgentSidebar({ editorRef }: AgentSidebarProps) {
           </div>
         )}
         <div ref={bottomRef} />
+      </div>
+
+      {/* ── Generation Settings ── */}
+      <div style={styles.settingsPanel}>
+        <div style={styles.settingsRow}>
+          <span style={styles.settingsIcon}>🖼</span>
+          <select style={styles.select} value={settings.imageModel} onChange={(e) => setSettings({ imageModel: e.target.value as any })}>
+            <option value="seedream">Seedream v4</option>
+            <option value="flux">Flux 2 Pro</option>
+          </select>
+          <select style={styles.select} value={settings.imageResolution} onChange={(e) => setSettings({ imageResolution: e.target.value })}>
+            <option value="1K">1K</option>
+            <option value="2K">2K</option>
+            <option value="4K">4K</option>
+          </select>
+          <select style={styles.select} value={settings.imageAspectRatio} onChange={(e) => setSettings({ imageAspectRatio: e.target.value })}>
+            <option value="16:9">16:9</option>
+            <option value="4:3">4:3</option>
+            <option value="1:1">1:1</option>
+            <option value="9:16">9:16</option>
+          </select>
+        </div>
+        <div style={styles.settingsRow}>
+          <span style={styles.settingsIcon}>🎬</span>
+          <select style={styles.select} value={settings.videoModel} onChange={(e) => setSettings({ videoModel: e.target.value as any })}>
+            <option value="dop_standard">DoP Standard</option>
+            <option value="dop_turbo">DoP Turbo</option>
+            <option value="kling">Kling 3.0</option>
+          </select>
+          <select style={styles.select} value={settings.videoDuration} onChange={(e) => setSettings({ videoDuration: Number(e.target.value) })}>
+            <option value={3}>3s</option>
+            <option value={5}>5s</option>
+          </select>
+        </div>
       </div>
 
       <div style={styles.inputArea}>
@@ -527,6 +596,37 @@ const styles: Record<string, React.CSSProperties> = {
   typing: {
     color: '#6b7280',
     fontStyle: 'italic',
+  },
+  settingsPanel: {
+    padding: '8px 12px',
+    borderTop: '1px solid #2a2a4a',
+    background: '#12172a',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '6px',
+  },
+  settingsRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+  },
+  settingsIcon: {
+    fontSize: '13px',
+    flexShrink: 0,
+    width: '18px',
+  },
+  select: {
+    flex: 1,
+    background: '#1e293b',
+    color: '#cbd5e1',
+    border: '1px solid #334155',
+    borderRadius: '6px',
+    padding: '3px 5px',
+    fontSize: '11px',
+    fontFamily: 'system-ui, sans-serif',
+    cursor: 'pointer',
+    outline: 'none',
+    minWidth: 0,
   },
   inputArea: {
     padding: '12px',
