@@ -4,3 +4,6 @@ anthropic
 python-dotenv
 openai
 groq
+aiosqlite
+langgraph
+pydantic-settings

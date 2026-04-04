@@ -1,10 +1,19 @@
-import os
-import re
 import base64
+import re
 import tempfile
+
 from groq import Groq
 
-client = Groq(api_key=os.environ["GROQ_API_KEY"])
+from config import get_settings
+
+_client: Groq | None = None
+
+
+def _get_client() -> Groq:
+    global _client
+    if _client is None:
+        _client = Groq(api_key=get_settings().groq_api_key)
+    return _client
 
 
 def transcribe(audio_b64: str) -> str:
@@ -13,11 +22,11 @@ def transcribe(audio_b64: str) -> str:
         f.write(audio_bytes)
         fname = f.name
     with open(fname, 'rb') as af:
-        result = client.audio.transcriptions.create(
+        result = _get_client().audio.transcriptions.create(
             model="whisper-large-v3-turbo",
             file=af,
-            language="ru",
-            prompt="Хиггс.",
+            language="en",
+            prompt="Higgs.",
         )
     text = result.text.strip()
     if len(text) < 3:
@@ -25,7 +34,6 @@ def transcribe(audio_b64: str) -> str:
 
     low = text.lower()
 
-    # Hard hallucination strings
     HALLUCINATIONS = {
         "thank you", "thanks for watching", "bye", "goodbye",
         "subscribe", "you", ".", "thanks.",
@@ -33,7 +41,6 @@ def transcribe(audio_b64: str) -> str:
     if low in HALLUCINATIONS:
         return ""
 
-    # Prompt echo detection — if 4+ of our prompt words appear it's an echo
     PROMPT_WORDS = {"higgs", "canvas", "uml", "diagram", "flowchart", "brainstorm", "sticky", "note"}
     words = set(re.sub(r"[^a-z ]", "", low).split())
     if len(words & PROMPT_WORDS) >= 4:

@@ -1,8 +1,41 @@
 import asyncio
 import json
 import time
+import uuid
 from typing import Any
 from fastapi import WebSocket, WebSocketDisconnect
+
+
+COLOR_MAP = {
+    "purple": "violet", "pink": "light-violet", "gray": "grey",
+    "light-gray": "grey", "lightgray": "grey", "dark-blue": "blue",
+    "light-purple": "light-violet", "teal": "green", "cyan": "light-blue",
+    "lime": "light-green", "salmon": "light-red", "brown": "orange",
+}
+
+
+def _apply_optimistic(canvas: list[dict], action: dict):
+    """Update the in-memory canvas after emitting an agent action."""
+    t = action.get("_type", "")
+    if t in ("create_shape", "create_note", "create_text", "create_arrow"):
+        canvas.append({
+            "id": action.get("shapeId", action.get("id", "")),
+            "type": {"create_note": "note", "create_text": "text",
+                     "create_arrow": "arrow"}.get(t, "geo"),
+            "x": action.get("x", action.get("x1", 0)),
+            "y": action.get("y", action.get("y1", 0)),
+            "w": action.get("w", 200), "h": action.get("h", 100),
+            "text": action.get("text", ""), "color": action.get("color", ""),
+            "geo": action.get("geo", "rectangle"),
+        })
+    elif t == "delete_shape":
+        sid = action.get("id") or action.get("shapeId")
+        canvas[:] = [s for s in canvas if s.get("id") != sid]
+    elif t == "move_shape":
+        for s in canvas:
+            if s.get("id") == action.get("id"):
+                s["x"] = action.get("x", s["x"])
+                s["y"] = action.get("y", s["y"])
 
 
 class ConversationBuffer:
@@ -42,21 +75,46 @@ class RoomManager:
         self._rooms: dict[str, dict[str, WebSocket]] = {}
         # room_id → ConversationBuffer
         self._buffers: dict[str, ConversationBuffer] = {}
-        # room_id → canvas_state (last known, sent by any client)
+        # room_id → canvas_state (simplified CanvasShape list for AI context)
         self._canvas: dict[str, list[dict]] = {}
+        # room_id → full tldraw snapshot (for perfect canvas restore)
+        self._canvas_snapshot: dict[str, dict | None] = {}
         # room_id → pending wake word command being accumulated
         self._pending_command: dict[str, str] = {}
         # room_id → asyncio task waiting to flush the command
         self._pending_task: dict[str, asyncio.Task] = {}
+        # room_id → asyncio task for deferred DB save
+        self._save_tasks: dict[str, asyncio.Task] = {}
+        # HITL: request_id → asyncio.Event
+        self._confirmations: dict[str, asyncio.Event] = {}
+        # HITL: request_id → approved bool
+        self._confirm_results: dict[str, bool] = {}
 
-    def _ensure_room(self, room_id: str):
+    async def _ensure_room(self, room_id: str):
         if room_id not in self._rooms:
             self._rooms[room_id] = {}
             self._buffers[room_id] = ConversationBuffer()
-            self._canvas[room_id] = []
+            from db import load_room
+            data = await load_room(room_id)
+            self._canvas[room_id] = data["shapes"]
+            self._canvas_snapshot[room_id] = data["snapshot"]
+
+    def _schedule_save(self, room_id: str):
+        existing = self._save_tasks.get(room_id)
+        if existing and not existing.done():
+            existing.cancel()
+        self._save_tasks[room_id] = asyncio.create_task(self._deferred_save(room_id))
+
+    async def _deferred_save(self, room_id: str):
+        await asyncio.sleep(2.0)
+        from db import save_canvas
+        await save_canvas(
+            room_id,
+            self._canvas.get(room_id, []),
+            self._canvas_snapshot.get(room_id),
+        )
 
     def get_buffer(self, room_id: str) -> ConversationBuffer:
-        self._ensure_room(room_id)
         return self._buffers[room_id]
 
     def get_canvas(self, room_id: str) -> list[dict]:
@@ -64,9 +122,14 @@ class RoomManager:
 
     def set_canvas(self, room_id: str, canvas_state: list[dict]):
         self._canvas[room_id] = canvas_state
+        self._schedule_save(room_id)
+
+    def set_canvas_snapshot(self, room_id: str, snapshot: dict):
+        self._canvas_snapshot[room_id] = snapshot
+        self._schedule_save(room_id)
 
     async def join(self, room_id: str, username: str, ws: WebSocket):
-        self._ensure_room(room_id)
+        await self._ensure_room(room_id)
         self._rooms[room_id][username] = ws
         await self._broadcast_room_update(room_id)
 
@@ -76,7 +139,7 @@ class RoomManager:
         if not room:
             self._rooms.pop(room_id, None)
             self._buffers.pop(room_id, None)
-            self._canvas.pop(room_id, None)
+            # Keep canvas + snapshot in memory for fast rejoin; DB has persisted copy
         else:
             await self._broadcast_room_update(room_id)
 
@@ -129,6 +192,9 @@ async def _handle_audio(room_id: str, username: str, audio_b64: str):
     )
     room_manager.get_buffer(room_id).add(username, text)
 
+    # Persist transcript
+    asyncio.create_task(_save_transcript(room_id, username, text))
+
     if room_id in room_manager._pending_command:
         # Already triggered — append continuation chunk and reset flush timer
         room_manager._pending_command[room_id] += " " + text
@@ -167,6 +233,14 @@ async def _handle_audio(room_id: str, username: str, audio_b64: str):
         asyncio.create_task(_classify_and_maybe_trigger(room_id, text))
 
 
+async def _save_transcript(room_id: str, username: str, text: str):
+    try:
+        from db import save_transcript
+        await save_transcript(room_id, username, text, time.time())
+    except Exception as e:
+        print(f"[db] transcript save error: {e}")
+
+
 async def _classify_and_maybe_trigger(room_id: str, text: str):
     """Run LLM classifier; if it's a canvas command, start accumulation window."""
     from intent import is_canvas_command
@@ -193,56 +267,23 @@ async def _flush_command(room_id: str):
 
 
 async def _run_listener_now(room_id: str, command: str):
-    """Extract intent then call the canvas agent."""
+    """Strip wake word and pass directly to the LangGraph canvas agent."""
+    import re
     canvas_state = room_manager.get_canvas(room_id)
-    print(f"[intent] raw: {command}")
+    # Simple wake-word strip — Sonnet handles the rest
+    clean = re.sub(
+        r'\b(higgs|higs|highs|hicks|хиггс|хигс|хикс|хиг)\b', '',
+        command, flags=re.IGNORECASE
+    ).strip(' ,.')
+    if not clean:
+        clean = command
+    print(f"[listener] cmd: '{clean}'")
 
-    from intent import extract_intent
+    from listener import listener_agent_react
     try:
-        clean_command = await asyncio.to_thread(extract_intent, command)
-    except Exception as e:
-        print(f"[intent] error: {e}")
-        clean_command = command
-    print(f"[intent] clean: {clean_command}")
-
-    from listener import listener_agent
-    try:
-        actions = await asyncio.to_thread(listener_agent, clean_command, canvas_state)
+        await listener_agent_react(clean, canvas_state, room_id)
     except Exception as e:
         print(f"[listener] error: {e}")
-        return
-    COLOR_MAP = {
-        "purple": "violet", "pink": "light-violet", "gray": "grey",
-        "light-gray": "grey", "lightgray": "grey", "dark-blue": "blue",
-        "light-purple": "light-violet", "teal": "green", "cyan": "light-blue",
-        "lime": "light-green", "salmon": "light-red", "brown": "orange",
-    }
-    print(f"[listener] got {len(actions)} actions")
-    for action in actions:
-        # Normalize: listener may output "type" instead of "_type"
-        if "type" in action and "_type" not in action:
-            action["_type"] = action.pop("type")
-        # Normalize colors to valid tldraw values
-        if "color" in action:
-            action["color"] = COLOR_MAP.get(action["color"], action["color"])
-        await room_manager.broadcast(room_id, {"type": "agent_action", "action": action})
-
-
-async def _maybe_run_listener(room_id: str, username: str):
-    """Wait for silence threshold, then trigger listener agent if needed."""
-    await asyncio.sleep(ConversationBuffer.SILENCE_THRESHOLD_SEC + 0.1)
-    buf = room_manager.get_buffer(room_id)
-    if not buf.should_trigger():
-        return
-    buf.mark_triggered()
-    transcript = buf.format()
-    canvas_state = room_manager.get_canvas(room_id)
-
-    # Import here to avoid circular imports
-    from listener import listener_agent
-    actions = await asyncio.to_thread(listener_agent, transcript, canvas_state)
-    for action in actions:
-        await room_manager.broadcast(room_id, {"type": "agent_action", "action": action})
 
 
 async def handle_websocket(ws: WebSocket, room_id: str, username: str):
@@ -252,6 +293,24 @@ async def handle_websocket(ws: WebSocket, room_id: str, username: str):
     # Notify the new user of existing peers so they can initiate offers
     existing = [u for u in room_manager.users_in_room(room_id) if u != username]
     await ws.send_text(json.dumps({"type": "existing_peers", "peers": existing}))
+
+    # Send persisted canvas to new user
+    snapshot = room_manager._canvas_snapshot.get(room_id)
+    if snapshot:
+        # Full tldraw restore — preferred path
+        try:
+            await ws.send_text(json.dumps({"type": "canvas_restore_full", "snapshot": snapshot}))
+        except Exception:
+            pass
+    elif room_manager._canvas.get(room_id):
+        # Fallback: relay agent-created shapes as individual actions
+        try:
+            await ws.send_text(json.dumps({
+                "type": "canvas_snapshot",
+                "shapes": room_manager._canvas[room_id],
+            }))
+        except Exception:
+            pass
 
     try:
         while True:
@@ -270,8 +329,20 @@ async def handle_websocket(ws: WebSocket, room_id: str, username: str):
                     asyncio.create_task(_handle_audio(room_id, username, audio_b64))
 
             elif t == "canvas_state":
-                # Clients can push their canvas snapshot so listener has context
+                # Simplified shape list from frontend — update AI context
                 room_manager.set_canvas(room_id, msg.get("state", []))
+
+            elif t == "canvas_snapshot_full":
+                # Full tldraw snapshot — store for new-user restore
+                snapshot = msg.get("snapshot")
+                if snapshot:
+                    room_manager.set_canvas_snapshot(room_id, snapshot)
+
+            elif t == "confirm_response":
+                req_id = msg.get("request_id")
+                if req_id and req_id in room_manager._confirmations:
+                    room_manager._confirm_results[req_id] = bool(msg.get("approved", False))
+                    room_manager._confirmations[req_id].set()
 
     except WebSocketDisconnect:
         pass
