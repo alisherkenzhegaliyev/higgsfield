@@ -3,6 +3,7 @@ import { Tldraw, Editor } from 'tldraw'
 import 'tldraw/tldraw.css'
 import GenerationOverlay from './GenerationOverlay'
 import AnimationPanel from './AnimationPanel'
+import CollabCursors from './CollabCursors'
 
 interface CanvasPaneProps {
   editorRef: MutableRefObject<Editor | null>
@@ -13,6 +14,7 @@ function CanvasOverlays() {
     <>
       <GenerationOverlay />
       <AnimationPanel />
+      <CollabCursors />
     </>
   )
 }

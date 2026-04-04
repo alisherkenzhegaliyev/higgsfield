@@ -73,6 +73,10 @@ async def _dispatch(
     elif t == "audio_relay":
         await room_manager.broadcast(room_id, msg, exclude=username)
 
+    # --- Cursor tracking ---
+    elif t == "cursor_move":
+        await room_manager.broadcast(room_id, {**msg, "username": username}, exclude=username)
+
     # --- Canvas state (simplified shapes for AI context) ---
     elif t == "canvas_state":
         room_manager.set_canvas(room_id, msg.get("state", []))

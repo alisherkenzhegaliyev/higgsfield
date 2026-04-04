@@ -18,9 +18,12 @@ export type VoiceChatCallbacks = {
   onCanvasSnapshot: (shapes: unknown[]) => void
 }
 
+export type CursorEntry = { x: number; y: number }
+
 type UseVoiceChatReturn = {
   users: VoiceUser[]
   transcripts: TranscriptEntry[]
+  cursors: Record<string, CursorEntry>
   isMuted: boolean
   isConnected: boolean
   isListenerActive: boolean
@@ -55,6 +58,7 @@ export function useVoiceChat(
 ): UseVoiceChatReturn {
   const [users, setUsers] = useState<VoiceUser[]>([])
   const [transcripts, setTranscripts] = useState<TranscriptEntry[]>([])
+  const [cursors, setCursors] = useState<Record<string, CursorEntry>>({})
   const [isMuted, setIsMuted] = useState(false)
   const [isConnected, setIsConnected] = useState(false)
   const [isListenerActive, setIsListenerActive] = useState(false)
@@ -378,8 +382,11 @@ export function useVoiceChat(
               nextPlayTimeRef.current = startAt + buffer.duration
             })
           } catch {}
+        } else if (t === 'cursor_move') {
+          setCursors((prev) => ({ ...prev, [msg.username as string]: { x: msg.x as number, y: msg.y as number } }))
         } else if (t === 'user_left') {
           closePeer(msg.username)
+          setCursors((prev) => { const next = { ...prev }; delete next[msg.username as string]; return next })
         }
       }
     }
@@ -438,5 +445,5 @@ export function useVoiceChat(
     livekitRoomRef.current?.localParticipant.setMicrophoneEnabled(!next)
   }, [])
 
-  return { users, transcripts, isMuted, isConnected, isListenerActive, toggleMute, sendWsMessage }
+  return { users, transcripts, cursors, isMuted, isConnected, isListenerActive, toggleMute, sendWsMessage }
 }
