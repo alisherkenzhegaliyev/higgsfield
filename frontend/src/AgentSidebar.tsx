@@ -1,6 +1,7 @@
 import { MutableRefObject, useState, useRef, useEffect, KeyboardEvent } from 'react'
-import { Editor, createShapeId, TLShapeId, toRichText } from 'tldraw'
-import { streamMessage, StreamAction, CanvasShape } from './api'
+import { Editor, createShapeId, TLShapeId, toRichText, AssetRecordType } from 'tldraw'
+import { streamMessage, startGeneration, proxyUrl, StreamAction, CanvasShape } from './api'
+import { useGenerationContext } from './GenerationContext'
 
 interface AgentSidebarProps {
   editorRef: MutableRefObject<Editor | null>
@@ -44,7 +45,69 @@ function agentId(id: string): TLShapeId {
   return (id.startsWith('shape:') ? id : `shape:${id}`) as TLShapeId
 }
 
-function applyAction(editor: Editor, action: StreamAction) {
+/** Find a free position near (nearX, nearY) that doesn't overlap existing shapes. */
+function findFreePosition(
+  editor: Editor,
+  nearX: number,
+  nearY: number,
+  excludeId?: TLShapeId
+): { x: number; y: number } {
+  const shapes = editor.getCurrentPageShapes().filter((s) => s.id !== excludeId)
+  const SIZE = 64
+  const offsets = [
+    [-90, -90], [0, -110], [90, -90],
+    [-110, 0], [110, 0],
+    [-90, 90], [0, 110], [90, 90],
+  ]
+  for (const [dx, dy] of offsets) {
+    const x = nearX + dx
+    const y = nearY + dy
+    const clear = shapes.every((shape) => {
+      const b = editor.getShapePageBounds(shape)
+      if (!b) return true
+      return x + SIZE < b.minX || x > b.maxX || y + SIZE < b.minY || y > b.maxY
+    })
+    if (clear) return { x, y }
+  }
+  return { x: nearX - 90, y: nearY - 110 }
+}
+
+/** Move or create the persistent AI circle near the given canvas coordinates. */
+function ensureAiCircle(
+  editor: Editor,
+  circleRef: { current: TLShapeId | null },
+  nearX: number,
+  nearY: number
+) {
+  const pos = findFreePosition(editor, nearX, nearY, circleRef.current ?? undefined)
+  if (circleRef.current && editor.getShape(circleRef.current)) {
+    editor.updateShapes([{ id: circleRef.current, type: 'geo', x: pos.x, y: pos.y }])
+  } else {
+    const id = createShapeId()
+    editor.createShapes([{
+      id,
+      type: 'geo',
+      x: pos.x,
+      y: pos.y,
+      props: {
+        geo: 'ellipse' as const,
+        w: 64, h: 64,
+        richText: toRichText('AI'),
+        color: 'violet' as any,
+        fill: 'solid' as const,
+      },
+    }])
+    circleRef.current = id
+  }
+}
+
+function applyAction(
+  editor: Editor,
+  action: StreamAction,
+  onGenerationComplete: (gen: import('./GenerationContext').PendingGeneration) => void,
+  onThinkingStart: (gen: import('./GenerationContext').ThinkingGeneration) => void,
+  onThinkingEnd: (id: string) => void,
+) {
   const t = action._type
 
   if (t === 'create_note') {
@@ -158,11 +221,128 @@ function applyAction(editor: Editor, action: StreamAction) {
     }
   } else if (t === 'delete_shape') {
     editor.deleteShapes([action.id as TLShapeId])
+
+  } else if (t === 'generate_image') {
+    const x = (action.x as number) ?? 200
+    const y = (action.y as number) ?? 200
+    const prompt = (action.prompt as string) ?? ''
+    const thinkingId = `thinking-img-${Date.now()}`
+
+    // Canvas placeholder — shows exactly where the image will land
+    const placeholderId = createShapeId()
+    editor.createShapes([{
+      id: placeholderId,
+      type: 'geo',
+      x, y,
+      props: {
+        geo: 'rectangle' as const,
+        w: 640, h: 360,
+        richText: toRichText(`Generating image…\n"${prompt.slice(0, 80)}"`),
+        color: 'violet' as any,
+        fill: 'semi' as const,
+        dash: 'dashed' as const,
+      },
+    }])
+
+    onThinkingStart({ id: thinkingId, x, y, w: 640, h: 360, prompt, type: 'image' })
+
+    startGeneration({ type: 'image', prompt, x, y }, (status) => {
+      if (status.status !== 'completed' && status.status !== 'failed') return
+      onThinkingEnd(thinkingId)
+      editor.deleteShapes([placeholderId])
+      if (status.status === 'completed' && status.url) {
+        const imageId = createShapeId()
+        const assetId = AssetRecordType.createId()
+        editor.createAssets([{
+          type: 'image', id: assetId, typeName: 'asset',
+          props: { w: 640, h: 360, name: prompt.slice(0, 40), isAnimated: false, mimeType: 'image/png', src: proxyUrl(status.url!) },
+          meta: {},
+        }])
+        editor.createShapes([{
+          id: imageId, type: 'image', x, y, opacity: 0.4,
+          props: { w: 640, h: 360, assetId, playing: false, url: '', crop: null, flipX: false, flipY: false },
+        }])
+        onGenerationComplete({
+          shapeId: imageId as unknown as string,
+          assetId: assetId as unknown as string,
+          x, y, w: 640, h: 360, prompt, mediaUrl: status.url, type: 'image',
+        })
+      }
+    })
+
+  } else if (t === 'generate_video') {
+    const x = (action.x as number) ?? 400
+    const y = (action.y as number) ?? 200
+    const prompt = (action.prompt as string) ?? ''
+    const sourceShapeId = action.sourceImageShapeId
+      ? agentId(action.sourceImageShapeId as string)
+      : undefined
+
+    let imageUrl: string | undefined
+    if (sourceShapeId) {
+      const srcShape = editor.getShape(sourceShapeId)
+      if (srcShape) {
+        const srcProps = srcShape.props as Record<string, unknown>
+        if (srcProps.assetId) {
+          const asset = editor.getAsset(srcProps.assetId as any)
+          if (asset?.props && 'src' in asset.props) {
+            imageUrl = asset.props.src as string
+          }
+        }
+      }
+    }
+
+    if (imageUrl) {
+      const thinkingId = `thinking-vid-${Date.now()}`
+
+      const placeholderId = createShapeId()
+      editor.createShapes([{
+        id: placeholderId,
+        type: 'geo',
+        x, y,
+        props: {
+          geo: 'rectangle' as const,
+          w: 640, h: 360,
+          richText: toRichText(`Generating video…\n"${prompt.slice(0, 80)}"`),
+          color: 'violet' as any,
+          fill: 'semi' as const,
+          dash: 'dashed' as const,
+        },
+      }])
+
+      onThinkingStart({ id: thinkingId, x, y, w: 640, h: 360, prompt, type: 'video' })
+
+      startGeneration({ type: 'video', prompt, x, y, image_url: imageUrl }, (status) => {
+        if (status.status !== 'completed' && status.status !== 'failed') return
+        onThinkingEnd(thinkingId)
+        editor.deleteShapes([placeholderId])
+        if (status.status === 'completed' && status.url) {
+          const videoId = createShapeId()
+          const assetId = AssetRecordType.createId()
+          editor.createAssets([{
+            type: 'video', id: assetId, typeName: 'asset',
+            props: { w: 640, h: 360, name: prompt.slice(0, 40), isAnimated: true, mimeType: 'video/mp4', src: proxyUrl(status.url!) },
+            meta: {},
+          }])
+          editor.createShapes([{
+            id: videoId, type: 'video', x, y, opacity: 0.4,
+            props: { w: 640, h: 360, assetId, playing: true, url: '' },
+          }])
+          onGenerationComplete({
+            shapeId: videoId as unknown as string,
+            assetId: assetId as unknown as string,
+            x, y, w: 640, h: 360, prompt, mediaUrl: status.url, type: 'video',
+          })
+        }
+      })
+    }
   }
   // 'message' is handled in the sidebar
 }
 
 export default function AgentSidebar({ editorRef }: AgentSidebarProps) {
+  const { onGenerationComplete, onThinkingStart, onThinkingEnd } = useGenerationContext()
+  const aiCircleRef = useRef<TLShapeId | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       role: 'assistant',
@@ -196,7 +376,13 @@ export default function AgentSidebar({ editorRef }: AgentSidebarProps) {
           gotMessage = true
           setMessages((prev) => [...prev, { role: 'assistant', content: action.text as string }])
         } else if (editorRef.current) {
-          applyAction(editorRef.current, action)
+          // Move the AI circle to near the coordinates of whatever is being created
+          const ax = (action.x as number) ?? (action.x1 as number) ?? null
+          const ay = (action.y as number) ?? (action.y1 as number) ?? null
+          if (ax !== null && ay !== null) {
+            ensureAiCircle(editorRef.current, aiCircleRef, ax, ay)
+          }
+          applyAction(editorRef.current, action, onGenerationComplete, onThinkingStart, onThinkingEnd)
         }
       },
       () => {

@@ -1,6 +1,7 @@
 import { MutableRefObject } from 'react'
 import { Tldraw, Editor } from 'tldraw'
 import 'tldraw/tldraw.css'
+import GenerationOverlay from './GenerationOverlay'
 
 interface CanvasPaneProps {
   editorRef: MutableRefObject<Editor | null>
@@ -13,6 +14,7 @@ export default function CanvasPane({ editorRef }: CanvasPaneProps) {
         onMount={(editor) => {
           editorRef.current = editor
         }}
+        components={{ InFrontOfTheCanvas: GenerationOverlay }}
       />
     </div>
   )
