@@ -1,9 +1,11 @@
 import { MutableRefObject, useState, useRef, useEffect, KeyboardEvent } from 'react'
 import { Editor, createShapeId, TLShapeId, toRichText } from 'tldraw'
-import { streamMessage, StreamAction, CanvasShape } from './api'
+import { streamMessage, StreamAction } from './api'
+import { getCanvasState } from './canvasUtils'
 
 interface AgentSidebarProps {
   editorRef: MutableRefObject<Editor | null>
+  applyActionRef?: MutableRefObject<((action: StreamAction) => void) | null>
 }
 
 type ChatMessage = {
@@ -11,33 +13,6 @@ type ChatMessage = {
   content: string
 }
 
-
-function getCanvasState(editor: Editor): CanvasShape[] {
-  return editor.getCurrentPageShapes().map((shape) => {
-    const props = shape.props as Record<string, unknown>
-    let text = ''
-    const rawText = props.text ?? props.richText
-    if (typeof rawText === 'string') {
-      text = rawText
-    } else if (rawText && typeof rawText === 'object' && 'content' in rawText) {
-      const doc = rawText as { content?: Array<{ content?: Array<{ text?: string }> }> }
-      text = (doc.content ?? [])
-        .map((p) => (p.content ?? []).map((leaf) => leaf.text ?? '').join(''))
-        .join('\n')
-    }
-    return {
-      id: shape.id,
-      type: shape.type,
-      x: Math.round(shape.x),
-      y: Math.round(shape.y),
-      text,
-      color: (props.color as string) ?? '',
-      w: props.w as number | undefined,
-      h: props.h as number | undefined,
-      geo: props.geo as string | undefined,
-    }
-  })
-}
 
 /** Convert agent-assigned shapeId → tldraw TLShapeId */
 function agentId(id: string): TLShapeId {
@@ -162,7 +137,16 @@ function applyAction(editor: Editor, action: StreamAction) {
   // 'message' is handled in the sidebar
 }
 
-export default function AgentSidebar({ editorRef }: AgentSidebarProps) {
+export default function AgentSidebar({ editorRef, applyActionRef }: AgentSidebarProps) {
+  useEffect(() => {
+    if (applyActionRef) {
+      applyActionRef.current = (action: StreamAction) => {
+        console.log('[applyAction] editor:', !!editorRef.current, 'action:', action._type)
+        if (editorRef.current) applyAction(editorRef.current, action)
+      }
+    }
+  }, [applyActionRef, editorRef])
+
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       role: 'assistant',

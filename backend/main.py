@@ -1,3 +1,6 @@
+import logging
+from contextlib import asynccontextmanager
+
 import asyncio
 import base64
 import io
@@ -9,8 +12,26 @@ import urllib.request
 import httpx
 from PIL import Image
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, WebSocket, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+
+from chat_agent import router as chat_router
+from db import init_db
+from ws_handler import handle_websocket
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_db()
+    logger.info("Database ready")
+    yield
+
 from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
 from typing import Any
@@ -22,7 +43,7 @@ from higgsfield import (
     get_request_status,
 )
 
-app = FastAPI(title="AI Brainstorm Canvas API")
+app = FastAPI(title="Higgsfield API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -292,6 +313,12 @@ async def upload_image(request: Request):
             media_type="application/json",
             headers=cors,
         )
+app.include_router(chat_router)
+
+
+@app.websocket("/ws/{room_id}/{username}")
+async def websocket_endpoint(ws: WebSocket, room_id: str, username: str):
+    await handle_websocket(ws, room_id, username)
 
 
 @app.get("/health")

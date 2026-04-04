@@ -2,6 +2,11 @@ fastapi
 uvicorn[standard]
 anthropic
 python-dotenv
+openai
+groq
+aiosqlite
+langgraph
+pydantic-settings
 httpx[http2]
 pinscrape
 Pillow
