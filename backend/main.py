@@ -1,8 +1,13 @@
 import asyncio
+import base64
+import io
 import json
 import os
 import ssl
 import urllib.request
+
+import httpx
+from PIL import Image
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,7 +15,11 @@ from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
 from typing import Any
 from agent import stream_agent
-from higgsfield import submit_image_generation, submit_video_generation, get_request_status
+from higgsfield import (
+    submit_image_generation, submit_flux_generation,
+    submit_video_generation, submit_dop_turbo_generation, submit_kling_generation,
+    get_request_status,
+)
 
 app = FastAPI(title="AI Brainstorm Canvas API")
 
@@ -31,11 +40,15 @@ class ChatRequest(BaseModel):
 
 
 class GenerateRequest(BaseModel):
-    type: str  # "image" or "video"
+    type: str          # "image" or "video"
     prompt: str
     x: float = 200
     y: float = 200
     image_url: str | None = None
+    model: str = "seedream"   # image: "seedream" | "flux" / video: "dop_standard" | "dop_turbo"
+    resolution: str = "2K"    # "1K" | "2K" | "4K"
+    aspect_ratio: str = "16:9"
+    duration: int = 3          # seconds (video only)
 
 
 @app.post("/api/chat/stream")
@@ -114,9 +127,17 @@ async def generate(body: GenerateRequest):
         if body.type == "video":
             if not body.image_url:
                 return {"error": "image_url required for video generation"}, 400
-            result = await submit_video_generation(body.image_url, body.prompt, webhook_url=webhook)
+            if body.model == "dop_turbo":
+                result = await submit_dop_turbo_generation(body.image_url, body.prompt, body.duration, webhook_url=webhook)
+            elif body.model == "kling":
+                result = await submit_kling_generation(body.image_url, body.prompt, body.duration, webhook_url=webhook)
+            else:
+                result = await submit_video_generation(body.image_url, body.prompt, body.duration, webhook_url=webhook)
         else:
-            result = await submit_image_generation(body.prompt)
+            if body.model == "flux":
+                result = await submit_flux_generation(body.prompt, body.aspect_ratio, body.resolution)
+            else:
+                result = await submit_image_generation(body.prompt, body.aspect_ratio, body.resolution)
     except Exception as e:
         return {"error": str(e)}
 
@@ -173,6 +194,82 @@ async def proxy_media(url: str):
     except Exception as e:
         print(f"[proxy] FAILED {url!r}: {type(e).__name__}: {e}")
         return Response(content=str(e).encode(), status_code=502, headers=cors)
+
+
+def _preprocess_image(image_bytes: bytes) -> tuple[bytes, str, str]:
+    """Resize to max 1920px, strip alpha, convert to JPEG — ensures model compatibility."""
+    img = Image.open(io.BytesIO(image_bytes))
+    img = img.convert("RGB")  # remove alpha channel (PNG transparency)
+    if img.width > 1920 or img.height > 1920:
+        img.thumbnail((1920, 1920), Image.LANCZOS)
+    out = io.BytesIO()
+    img.save(out, format="JPEG", quality=92)
+    return out.getvalue(), "image/jpeg", "jpg"
+
+
+async def _upload_to_public_host(image_bytes: bytes, mime: str, ext: str) -> str:
+    """Try catbox.moe then transfer.sh. Returns public URL or raises."""
+    filename = f"image.{ext}"
+    async with httpx.AsyncClient(timeout=30) as client:
+        # 1. catbox.moe — permanent, no auth needed
+        try:
+            res = await client.post(
+                "https://catbox.moe/user/api.php",
+                data={"reqtype": "fileupload"},
+                files={"fileToUpload": (filename, image_bytes, mime)},
+            )
+            if res.status_code == 200 and res.text.strip().startswith("https://"):
+                return res.text.strip()
+            print(f"[upload] catbox.moe failed ({res.status_code}): {res.text[:100]}")
+        except Exception as e:
+            print(f"[upload] catbox.moe error: {e}")
+
+        # 2. transfer.sh — fallback
+        try:
+            res = await client.put(
+                f"https://transfer.sh/{filename}",
+                content=image_bytes,
+                headers={"Content-Type": mime, "Max-Days": "1"},
+            )
+            if res.status_code == 200 and res.text.strip().startswith("https://"):
+                return res.text.strip()
+            print(f"[upload] transfer.sh failed ({res.status_code}): {res.text[:100]}")
+        except Exception as e:
+            print(f"[upload] transfer.sh error: {e}")
+
+    raise RuntimeError("All upload services failed")
+
+
+@app.post("/api/upload-image")
+async def upload_image(request: Request):
+    """Upload a local data-URL image to a public host and return the public URL."""
+    cors = {"Access-Control-Allow-Origin": "*"}
+    try:
+        body = await request.json()
+        data_url: str = body.get("data_url", "")
+        if not data_url.startswith("data:"):
+            return Response(content=b"Expected data URL", status_code=400, headers=cors)
+
+        header, b64data = data_url.split(",", 1)
+        mime = header.split(":")[1].split(";")[0]   # e.g. "image/png"
+        ext = mime.split("/")[-1].split("+")[0]     # "png", "jpeg", "webp"
+        image_bytes = base64.b64decode(b64data)
+        image_bytes, mime, ext = _preprocess_image(image_bytes)
+
+        public_url = await _upload_to_public_host(image_bytes, mime, ext)
+        return Response(
+            content=json.dumps({"url": public_url}).encode(),
+            media_type="application/json",
+            headers=cors,
+        )
+    except Exception as e:
+        print(f"[upload] error: {e}")
+        return Response(
+            content=json.dumps({"error": str(e)}).encode(),
+            status_code=500,
+            media_type="application/json",
+            headers=cors,
+        )
 
 
 @app.get("/health")

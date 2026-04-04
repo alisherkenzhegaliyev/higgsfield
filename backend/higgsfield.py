@@ -41,7 +41,6 @@ async def submit_image_generation(
             "prompt": prompt,
             "aspect_ratio": aspect_ratio,
             "resolution": resolution,
-            "camera_fixed": False,
         },
     )
 
@@ -61,6 +60,68 @@ async def submit_video_generation(
             "image_url": image_url,
             "prompt": prompt,
             "duration": duration,
+        },
+    )
+
+
+async def submit_flux_generation(
+    prompt: str,
+    aspect_ratio: str = "16:9",
+    resolution: str = "1k",
+) -> dict:
+    return await _post(
+        "flux-2",
+        {
+            "prompt": prompt,
+            "image_urls": [],
+            "resolution": resolution.lower(),  # Flux uses lowercase: "1k", "2k"
+            "aspect_ratio": aspect_ratio,
+            "prompt_upsampling": True,
+        },
+    )
+
+
+async def submit_dop_turbo_generation(
+    image_url: str,
+    prompt: str,
+    duration: int = 3,
+    webhook_url: str | None = None,
+) -> dict:
+    path = "higgsfield-ai/dop/turbo"
+    if webhook_url:
+        path = f"{path}?hf_webhook={webhook_url}"
+    return await _post(
+        path,
+        {
+            "image_url": image_url,
+            "prompt": prompt,
+            "duration": duration,
+            "motions": [],
+            "enhance_prompt": True,
+        },
+    )
+
+
+async def submit_kling_generation(
+    image_url: str,
+    prompt: str,
+    duration: int = 5,
+    webhook_url: str | None = None,
+) -> dict:
+    path = "kling-video/v3.0/std/image-to-video"
+    if webhook_url:
+        path = f"{path}?hf_webhook={webhook_url}"
+    return await _post(
+        path,
+        {
+            "image_url": image_url,
+            "prompt": prompt,
+            "duration": duration,
+            "sound": "off",
+            "cfg_scale": 0.5,
+            "elements": [],
+            "multi_shots": False,
+            "multi_prompt": [],
         },
     )
 
