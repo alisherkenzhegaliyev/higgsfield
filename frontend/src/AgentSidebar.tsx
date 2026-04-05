@@ -1,12 +1,17 @@
 import { MutableRefObject, useState, useRef, useEffect, KeyboardEvent } from 'react'
 import { Editor, createShapeId, TLShapeId, toRichText, AssetRecordType } from 'tldraw'
 import { Send, Paperclip, Lock } from 'lucide-react'
-import { streamMessage, startGeneration, proxyUrl, StreamAction } from './api'
+import { streamMessage, startGeneration, proxyImageUrl, proxyUrl, StreamAction } from './api'
 import { getCanvasSnapshot } from './canvasUtils'
 import { useGenerationContext, GenerationSettings } from './GenerationContext'
 
 interface AgentSidebarProps {
   editorRef: MutableRefObject<Editor | null>
+  externalNotice?: {
+    id: string
+    content: string
+  } | null
+  onExternalNoticeConsumed?: (id: string) => void
 }
 
 type ChatMessage = {
@@ -133,6 +138,49 @@ export function applyAction(
         color: ((action.color as string) ?? 'black') as any,
         size: 'm' as const,
         autoSize: true,
+      },
+    }])
+
+  } else if (t === 'create_image') {
+    const url = (action.url as string) ?? ''
+    if (!url) return
+
+    const id = action.shapeId ? agentId(action.shapeId as string) : createShapeId()
+    const x = (action.x as number) ?? 200
+    const y = (action.y as number) ?? 200
+    const w = (action.w as number) ?? 300
+    const h = (action.h as number) ?? 200
+    const assetId = AssetRecordType.createId()
+
+    editor.createAssets([{
+      type: 'image',
+      id: assetId,
+      typeName: 'asset',
+      props: {
+        w,
+        h,
+        name: (action.shapeId as string) ?? 'moodboard-image',
+        isAnimated: false,
+        mimeType: 'image/jpeg',
+        src: proxyImageUrl(url),
+      },
+      meta: { originalUrl: url },
+    }])
+
+    editor.createShapes([{
+      id,
+      type: 'image',
+      x,
+      y,
+      props: {
+        w,
+        h,
+        assetId,
+        playing: false,
+        url: '',
+        crop: null,
+        flipX: false,
+        flipY: false,
       },
     }])
 
@@ -342,7 +390,11 @@ export function applyAction(
   // 'message' is handled in the sidebar
 }
 
-export default function AgentSidebar({ editorRef }: AgentSidebarProps) {
+export default function AgentSidebar({
+  editorRef,
+  externalNotice = null,
+  onExternalNoticeConsumed,
+}: AgentSidebarProps) {
   const { onGenerationComplete, onThinkingStart, onThinkingEnd, settings } = useGenerationContext()
   const aiCircleRef = useRef<TLShapeId | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([
@@ -358,6 +410,13 @@ export default function AgentSidebar({ editorRef }: AgentSidebarProps) {
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
   }, [messages])
+
+  useEffect(() => {
+    if (!externalNotice) return
+
+    setMessages((prev) => [...prev, { role: 'assistant', content: externalNotice.content }])
+    onExternalNoticeConsumed?.(externalNotice.id)
+  }, [externalNotice, onExternalNoticeConsumed])
 
   async function handleSend() {
     const text = input.trim()
