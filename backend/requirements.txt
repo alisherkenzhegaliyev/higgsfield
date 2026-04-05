@@ -3,7 +3,7 @@ anthropic>=0.89.0
 anyio
 fastapi>=0.100.0
 groq
-httpx
+httpx[http2]
 langchain-core>=1.0.0
 langgraph>=1.0.0
 langgraph-checkpoint
