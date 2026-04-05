@@ -8,6 +8,7 @@ incoming messages and delegates to room_manager and voice_pipeline.
 import asyncio
 import json
 import logging
+import time
 from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -99,3 +100,24 @@ async def _dispatch(
         if req_id and req_id in room_manager._confirmations:
             room_manager._confirm_results[req_id] = bool(msg.get("approved", False))
             room_manager._confirmations[req_id].set()
+
+    # --- Team chat message ---
+    elif t == "chat_message":
+        content: str = msg.get("content", "")
+        msg_type: str = msg.get("msgType", "text")
+        ts: int = msg.get("ts") or int(time.time() * 1000)
+        payload = {
+            "type": "chat_message",
+            "username": username,
+            "content": content,
+            "msgType": msg_type,
+            "ts": ts,
+        }
+        # Broadcast to ALL users including sender (sender uses server echo as source of truth)
+        await room_manager.broadcast(room_id, payload)
+        if msg_type == "image" and content.startswith("data:"):
+            # Store the shared image so the AI can use it for video generation etc.
+            room_manager.set_last_chat_image(room_id, content, username)
+        elif msg_type == "text" and content.strip():
+            from team_chat_agent import analyze_team_chat  # noqa: PLC0415
+            asyncio.create_task(analyze_team_chat(room_id, username, content))

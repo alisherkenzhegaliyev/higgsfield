@@ -4,12 +4,22 @@ import { StreamAction } from './api'
 export type VoiceUser = {
   username: string
   speaking: boolean
+  isAI?: boolean
 }
 
 export type TranscriptEntry = {
   username: string
   text: string
   ts: number
+}
+
+export type ChatMessage = {
+  id: string
+  username: string
+  content: string
+  msgType: 'text' | 'image'
+  ts: number
+  isAI?: boolean
 }
 
 export type VoiceChatCallbacks = {
@@ -24,11 +34,13 @@ type UseVoiceChatReturn = {
   users: VoiceUser[]
   transcripts: TranscriptEntry[]
   cursors: Record<string, CursorEntry>
+  chatMessages: ChatMessage[]
   isMuted: boolean
   isConnected: boolean
   isListenerActive: boolean
   toggleMute: () => void
   sendWsMessage: (msg: Record<string, unknown>) => void
+  sendChatMessage: (content: string, msgType?: 'text' | 'image') => void
 }
 
 const _API_BASE = (import.meta.env.VITE_API_URL ?? '').replace(/\/$/, '')
@@ -59,6 +71,7 @@ export function useVoiceChat(
   const [users, setUsers] = useState<VoiceUser[]>([])
   const [transcripts, setTranscripts] = useState<TranscriptEntry[]>([])
   const [cursors, setCursors] = useState<Record<string, CursorEntry>>({})
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
   const [isMuted, setIsMuted] = useState(false)
   const [isConnected, setIsConnected] = useState(false)
   const [isListenerActive, setIsListenerActive] = useState(false)
@@ -72,6 +85,8 @@ export function useVoiceChat(
   const iceServersRef = useRef<RTCIceServer[]>(FALLBACK_ICE)
 const livekitRoomRef = useRef<any>(null)
   const speakingTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+  const audioCtxRef = useRef<AudioContext | null>(null)
+  const nextPlayTimeRef = useRef<number>(0)
   // Keep callbacks in a ref so the WS onmessage closure always sees the latest version.
   const callbacksRef = useRef(callbacks)
   callbacksRef.current = callbacks
@@ -106,6 +121,10 @@ const livekitRoomRef = useRef<any>(null)
       wsRef.current.send(JSON.stringify(msg))
     }
   }, [])
+
+  const sendChatMessage = useCallback((content: string, msgType: 'text' | 'image' = 'text') => {
+    sendWsMessage({ type: 'chat_message', content, msgType, ts: Date.now() })
+  }, [sendWsMessage])
 
   // --- WebRTC helpers ---
 
@@ -283,9 +302,10 @@ const livekitRoomRef = useRef<any>(null)
         const t = msg.type
 
         if (t === 'room_update') {
-          const incoming: VoiceUser[] = (msg.users as { username: string }[]).map((u) => ({
+          const incoming: VoiceUser[] = (msg.users as { username: string; isAI?: boolean }[]).map((u) => ({
             username: u.username,
             speaking: false,
+            isAI: u.isAI ?? false,
           }))
           setUsers(incoming)
         } else if (t === 'existing_peers') {
@@ -324,6 +344,41 @@ const livekitRoomRef = useRef<any>(null)
           setIsListenerActive(true)
           callbacksRef.current.onAgentAction(msg.action as StreamAction)
           setTimeout(() => setIsListenerActive(false), 2000)
+        } else if (t === 'audio_relay') {
+          try {
+            const bin = atob(msg.data as string)
+            const bytes = new Uint8Array(bin.length)
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+
+            if (!audioCtxRef.current) {
+              audioCtxRef.current = new AudioContext({ latencyHint: 'interactive' })
+            }
+            const ctx = audioCtxRef.current
+            if (ctx.state === 'suspended') ctx.resume()
+
+            ctx.decodeAudioData(bytes.buffer.slice(0), (buffer) => {
+              const source = ctx.createBufferSource()
+              source.buffer = buffer
+              source.connect(ctx.destination)
+              const now = ctx.currentTime
+              // Schedule back-to-back; catch up immediately if we fall behind
+              const startAt = Math.max(now + 0.01, nextPlayTimeRef.current)
+              source.start(startAt)
+              nextPlayTimeRef.current = startAt + buffer.duration
+            })
+          } catch {}
+        } else if (t === 'chat_message') {
+          setChatMessages((prev) => [
+            ...prev.slice(-199),
+            {
+              id: crypto.randomUUID(),
+              username: msg.username as string,
+              content: msg.content as string,
+              msgType: (msg.msgType as 'text' | 'image') ?? 'text',
+              ts: msg.ts as number,
+              isAI: (msg.isAI as boolean) ?? false,
+            },
+          ])
         } else if (t === 'cursor_move') {
           setCursors((prev) => ({ ...prev, [msg.username as string]: { x: msg.x as number, y: msg.y as number } }))
         } else if (t === 'user_left') {
@@ -386,5 +441,5 @@ const livekitRoomRef = useRef<any>(null)
     livekitRoomRef.current?.localParticipant.setMicrophoneEnabled(!next)
   }, [])
 
-  return { users, transcripts, cursors, isMuted, isConnected, isListenerActive, toggleMute, sendWsMessage }
+  return { users, transcripts, cursors, chatMessages, isMuted, isConnected, isListenerActive, toggleMute, sendWsMessage, sendChatMessage }
 }

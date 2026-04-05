@@ -46,6 +46,7 @@ class AgentState(TypedDict):
     canvas: list[dict]
     room_id: str
     _stop: bool
+    model: str  # optional model override; falls back to settings.canvas_agent_model
 
 
 # ---------------------------------------------------------------------------
@@ -56,8 +57,9 @@ class AgentState(TypedDict):
 async def agent_node(state: AgentState) -> dict:
     settings = get_settings()
     system_text = CANVAS_AGENT_SYSTEM.format(canvas=format_canvas(state["canvas"]))
+    model = state.get("model") or settings.canvas_agent_model
     response = await _get_client().messages.create(
-        model=settings.canvas_agent_model,
+        model=model,
         max_tokens=2048,
         tools=TOOLS,
         system=system_text,
@@ -101,6 +103,7 @@ async def tool_node(state: AgentState) -> dict:
 
         elif name == "create_image":
             action = {"_type": "create_image", **args}
+            await room_manager.broadcast_ai_cursor(state["room_id"], float(args.get("x", 200)), float(args.get("y", 200)))
             await room_manager.broadcast(state["room_id"], {"type": "agent_action", "action": action})
             # Track as generic shape in optimistic state
             apply_optimistic(
@@ -150,6 +153,7 @@ async def tool_node(state: AgentState) -> dict:
                 "text": "Generating image…",
                 "color": "grey",
             }
+            await room_manager.broadcast_ai_cursor(state["room_id"], x, y)
             await room_manager.broadcast(state["room_id"], {"type": "agent_action", "action": placeholder})
             apply_optimistic(canvas, placeholder)
             apply_optimistic(room_manager.get_canvas(state["room_id"]), placeholder)
@@ -216,6 +220,7 @@ async def tool_node(state: AgentState) -> dict:
                 "text": "Generating video…",
                 "color": "violet",
             }
+            await room_manager.broadcast_ai_cursor(state["room_id"], x, y)
             await room_manager.broadcast(state["room_id"], {"type": "agent_action", "action": placeholder})
             apply_optimistic(canvas, placeholder)
             apply_optimistic(room_manager.get_canvas(state["room_id"]), placeholder)
@@ -255,6 +260,9 @@ async def tool_node(state: AgentState) -> dict:
             action = {"_type": name, **args}
             if "color" in action:
                 action["color"] = COLOR_MAP.get(action["color"], action["color"])
+            cursor_x = float(args.get("x", args.get("x1", 200)))
+            cursor_y = float(args.get("y", args.get("y1", 200)))
+            await room_manager.broadcast_ai_cursor(state["room_id"], cursor_x, cursor_y)
             await room_manager.broadcast(state["room_id"], {"type": "agent_action", "action": action})
             apply_optimistic(canvas, action)
             apply_optimistic(room_manager.get_canvas(state["room_id"]), action)
@@ -303,6 +311,7 @@ async def _poll_generation(
                 elif status.get("video"):
                     url = status["video"].get("url")
                 if url:
+                    await room_manager.broadcast_ai_cursor(room_id, x, y)
                     await room_manager.broadcast(
                         room_id,
                         {
@@ -360,14 +369,20 @@ canvas_agent = _builder.compile()
 # ---------------------------------------------------------------------------
 
 
-async def run_canvas_agent(command: str, canvas_state: list[dict], room_id: str) -> None:
-    logger.info("room=%s cmd='%s'", room_id, command[:80])
+async def run_canvas_agent(
+    command: str,
+    canvas_state: list[dict],
+    room_id: str,
+    model: str | None = None,
+) -> None:
+    logger.info("room=%s model=%s cmd='%s'", room_id, model or "default", command[:80])
     await canvas_agent.ainvoke(
         {
             "messages": [{"role": "user", "content": command}],
             "canvas": list(canvas_state),
             "room_id": room_id,
             "_stop": False,
+            "model": model or "",
         }
     )
     logger.info("room=%s agent done", room_id)
