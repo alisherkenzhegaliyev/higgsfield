@@ -209,3 +209,7 @@ __marimo__/
 template
 
 CLAUDE.md
+
+# Node
+node_modules/
+frontend/dist/
