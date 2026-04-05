@@ -49,3 +49,6 @@ watchfiles==1.1.1
 websockets==16.0
 xxhash==3.6.0
 zstandard==0.25.0
+Pillow==11.2.1
+pinscrape==5.1.0
+livekit-api==1.1.0
