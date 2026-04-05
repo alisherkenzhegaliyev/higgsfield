@@ -27,7 +27,7 @@ export type CanvasSnapshot = {
 // Raw action from the stream (uses _type discriminator)
 export type StreamAction = Record<string, unknown> & { _type: string }
 
-const API_BASE = (import.meta.env.VITE_API_URL ?? 'http://localhost:8000').replace(/\/$/, '')
+const API_BASE = (import.meta.env.VITE_API_URL ?? '').replace(/\/$/, '')
 
 /** Proxy a Higgsfield CDN URL through the local backend to avoid CORS. */
 export function proxyUrl(url: string): string {

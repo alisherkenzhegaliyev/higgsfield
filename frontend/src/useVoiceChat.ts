@@ -31,8 +31,8 @@ type UseVoiceChatReturn = {
   sendWsMessage: (msg: Record<string, unknown>) => void
 }
 
-const _API_BASE = (import.meta.env.VITE_API_URL ?? 'http://localhost:8000').replace(/\/$/, '')
-const WS_URL = _API_BASE.replace(/^http/, 'ws') + '/ws'
+const _API_BASE = (import.meta.env.VITE_API_URL ?? '').replace(/\/$/, '')
+const WS_URL = (_API_BASE || window.location.origin).replace(/^http/, 'ws') + '/ws'
 const FALLBACK_ICE: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }]
 
 async function fetchIceServers(): Promise<RTCIceServer[]> {
@@ -413,7 +413,6 @@ export function useVoiceChat(
 
     async function joinLiveKit() {
       try {
-        const _API_BASE = (import.meta.env.VITE_API_URL ?? 'http://localhost:8000').replace(/\/$/, '')
         const res = await fetch(`${_API_BASE}/api/livekit-token?room=${roomId}&username=${encodeURIComponent(username)}`)
         const { token, url } = await res.json()
         if (!token || !url || cancelled) return
