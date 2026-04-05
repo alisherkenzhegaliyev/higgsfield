@@ -5,10 +5,13 @@ from unittest.mock import AsyncMock, patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from agent.prompts import ACTION_SCHEMA
 from chat_agent import router as chat_router
 from context.diff import apply_diff_to_registry, diff_canvas
+from context.models import ContextPacket, SessionSummary
 from context.models import ObjectType, Position, SemanticRecord, Size, content_hash_for
 from context.preprocessors import preprocess_shape
+from context.prompt_builder import build_messages
 from context.storage import ContentRegistry
 
 
@@ -162,6 +165,23 @@ class ChatRouteTests(unittest.TestCase):
             canvas_snapshot={"shapes": canvas_state, "selected_ids": []},
             room_id="main",
         )
+
+
+class PromptCapabilityTests(unittest.TestCase):
+    def test_shared_action_schema_includes_media_generation(self) -> None:
+        self.assertIn('"generate_image"', ACTION_SCHEMA)
+        self.assertIn('"generate_video"', ACTION_SCHEMA)
+
+    def test_context_prompt_mentions_image_generation(self) -> None:
+        system_prompt, _ = build_messages(
+            ContextPacket(
+                user_message="Generate a horse-inspired leather texture",
+                session_summary=SessionSummary(),
+            )
+        )
+
+        self.assertIn("generate_image", system_prompt)
+        self.assertIn("sourceImageShapeId", system_prompt)
 
 
 if __name__ == "__main__":

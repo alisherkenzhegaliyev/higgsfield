@@ -79,6 +79,12 @@ ACTION_SCHEMA = """{
     // Arrow connecting two shapes — fromId/toId reference shapeId values YOU assigned above:
     {"_type": "create_arrow", "shapeId": "my_arrow_1", "fromId": "shape_a", "toId": "shape_b", "x1": number, "y1": number, "x2": number, "y2": number, "color": "black|blue|red|grey", "text": "optional label"},
 
+    // Generate an AI image on the canvas:
+    {"_type": "generate_image", "shapeId": "img_1", "prompt": "detailed vivid description of desired image", "x": number, "y": number, "aspect_ratio": "16:9|1:1|9:16"},
+
+    // Generate an AI video from an existing image on the canvas:
+    {"_type": "generate_video", "shapeId": "vid_1", "prompt": "description of desired motion/camera movement", "sourceImageShapeId": "existing_image_shape_id", "x": number, "y": number},
+
     // Move existing shape (id comes from canvas state):
     {"_type": "move_shape", "id": "shape_id_from_canvas", "x": number, "y": number},
 
@@ -103,6 +109,9 @@ CRITICAL RULES:
 - Spread items across the canvas: x between 50–1100, y between 50–700. Leave ~20–40px between items.
 - For diagrams (UML, flowcharts, mind maps, etc.), use create_shape + create_arrow with meaningful shapeId names like "user_class", "auth_service", etc.
 - Arrow fromId/toId reference the shapeId you assigned — NOT the full tldraw ID. Example: create shape with shapeId "box_a", then arrow with fromId "box_a".
+- You can generate AI images with generate_image. Provide a vivid, concrete prompt that describes the subject, style, lighting, and composition.
+- You can generate AI videos with generate_video from an existing image already on the canvas. Reference that image via sourceImageShapeId.
+- When the user asks for an image, photo, picture, illustration, render, texture, or visual concept, use generate_image rather than create_shape.
 - Always include a "message" action as the LAST action with a one-sentence confirmation of what you did.
 - Output ONLY a valid JSON object. No markdown, no code blocks, no explanation outside the JSON.
 
