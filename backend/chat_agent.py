@@ -2,21 +2,23 @@
 Chat agent API router.
 
 Exposes POST /api/chat/stream — a streaming SSE endpoint that takes a message
-and the current canvas state, then streams back canvas actions + a message reply.
+and the current canvas snapshot, then streams back canvas actions + a message
+reply.
 """
 
 import json
 import logging
-from typing import Any
+from typing import Any, AsyncIterator, Iterator
 
 import anthropic
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from agent.prompts import ACTION_SCHEMA, CHAT_AGENT_SYSTEM
 from agent.tools import format_canvas
 from config import get_settings
+from context.graph import run_context_agent
 
 logger = logging.getLogger(__name__)
 
@@ -74,12 +76,12 @@ def _close_and_parse_json(s: str) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# Streaming generator
+# Streaming generators
 # ---------------------------------------------------------------------------
 
 
-def _stream_agent(message: str, canvas_state: list[dict]) -> Any:
-    """Sync generator yielding SSE-formatted events."""
+def _stream_legacy_agent(message: str, canvas_state: list[dict]) -> Iterator[str]:
+    """Fallback path using the original prompt-only chat agent."""
     settings = get_settings()
     system = CHAT_AGENT_SYSTEM.format(
         canvas=format_canvas(canvas_state),
@@ -109,7 +111,6 @@ def _stream_agent(message: str, canvas_state: list[dict]) -> Any:
                 yield f"data: {json.dumps({'type': 'action', 'action': actions[cursor]})}\n\n"
                 cursor += 1
 
-    # Emit any remaining actions after stream closes.
     start = buffer.find("{")
     if start != -1:
         parsed = _close_and_parse_json(buffer[start:])
@@ -122,6 +123,32 @@ def _stream_agent(message: str, canvas_state: list[dict]) -> Any:
     yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
 
+async def _stream_agent(
+    message: str,
+    canvas_snapshot: dict[str, Any],
+    room_id: str,
+) -> AsyncIterator[str]:
+    try:
+        actions = await run_context_agent(
+            message=message,
+            canvas_snapshot=canvas_snapshot,
+            room_id=room_id,
+        )
+    except Exception:
+        logger.exception(
+            "context-aware chat failed for room=%s; falling back to legacy prompt",
+            room_id,
+        )
+        for event in _stream_legacy_agent(message, canvas_snapshot.get("shapes", [])):
+            yield event
+        return
+
+    for action in actions:
+        yield f"data: {json.dumps({'type': 'action', 'action': action})}\n\n"
+
+    yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+
 # ---------------------------------------------------------------------------
 # Route
 # ---------------------------------------------------------------------------
@@ -129,13 +156,34 @@ def _stream_agent(message: str, canvas_state: list[dict]) -> Any:
 
 class ChatRequest(BaseModel):
     message: str
-    canvas_state: list[dict[str, Any]] = []
+    canvas_state: list[dict[str, Any]] = Field(default_factory=list)
+    canvas_snapshot: dict[str, Any] = Field(default_factory=dict)
+    room_id: str = "main"
+
+
+def _coerce_canvas_snapshot(body: ChatRequest) -> dict[str, Any]:
+    snapshot = dict(body.canvas_snapshot)
+    shapes = snapshot.get("shapes")
+
+    if not isinstance(shapes, list) or (not shapes and body.canvas_state):
+        snapshot["shapes"] = list(body.canvas_state)
+
+    selected_ids = snapshot.get("selected_ids")
+    if not isinstance(selected_ids, list):
+        snapshot["selected_ids"] = []
+
+    viewport = snapshot.get("viewport")
+    if viewport is not None and not isinstance(viewport, dict):
+        snapshot.pop("viewport", None)
+
+    return snapshot
 
 
 @router.post("/api/chat/stream")
-def chat_stream(body: ChatRequest):
+async def chat_stream(body: ChatRequest):
+    canvas_snapshot = _coerce_canvas_snapshot(body)
     return StreamingResponse(
-        _stream_agent(body.message, body.canvas_state),
+        _stream_agent(body.message, canvas_snapshot, body.room_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",

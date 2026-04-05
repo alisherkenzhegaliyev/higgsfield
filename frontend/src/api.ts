@@ -8,6 +8,20 @@ export type CanvasShape = {
   w?: number
   h?: number
   geo?: string
+  url?: string
+  fromId?: string
+  toId?: string
+}
+
+export type CanvasSnapshot = {
+  shapes: CanvasShape[]
+  viewport?: {
+    x: number
+    y: number
+    w: number
+    h: number
+  }
+  selected_ids?: string[]
 }
 
 // Raw action from the stream (uses _type discriminator)
@@ -28,24 +42,39 @@ export type GenerationStatus = {
 
 export async function streamMessage(
   message: string,
-  canvasState: CanvasShape[],
+  canvasSnapshot: CanvasSnapshot,
   onAction: (action: StreamAction) => void,
   onDone: () => void,
-  onError: (err: Error) => void
+  onError: (err: Error) => void,
+  roomId = 'main',
 ): Promise<void> {
   let response: Response
+  console.info('[chat] sending request', {
+    apiBase: API_BASE,
+    roomId,
+    shapes: canvasSnapshot.shapes.length,
+    selected: canvasSnapshot.selected_ids?.length ?? 0,
+    hasViewport: Boolean(canvasSnapshot.viewport),
+  })
   try {
     response = await fetch(`${API_BASE}/api/chat/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, canvas_state: canvasState }),
+      body: JSON.stringify({
+        message,
+        room_id: roomId,
+        canvas_state: canvasSnapshot.shapes,
+        canvas_snapshot: canvasSnapshot,
+      }),
     })
   } catch (e) {
+    console.error('[chat] request failed before reaching backend', e)
     onError(e instanceof Error ? e : new Error('Network error'))
     return
   }
 
   if (!response.ok) {
+    console.error('[chat] backend responded with error', response.status)
     onError(new Error(`Backend error: ${response.status}`))
     return
   }

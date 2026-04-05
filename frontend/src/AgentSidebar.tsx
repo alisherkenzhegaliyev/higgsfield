@@ -1,7 +1,8 @@
 import { MutableRefObject, useState, useRef, useEffect, KeyboardEvent } from 'react'
 import { Editor, createShapeId, TLShapeId, toRichText, AssetRecordType } from 'tldraw'
 import { Send, Paperclip, Lock } from 'lucide-react'
-import { streamMessage, startGeneration, proxyUrl, StreamAction, CanvasShape } from './api'
+import { streamMessage, startGeneration, proxyUrl, StreamAction } from './api'
+import { getCanvasSnapshot } from './canvasUtils'
 import { useGenerationContext, GenerationSettings } from './GenerationContext'
 
 interface AgentSidebarProps {
@@ -11,33 +12,6 @@ interface AgentSidebarProps {
 type ChatMessage = {
   role: 'user' | 'assistant'
   content: string
-}
-
-function getCanvasState(editor: Editor): CanvasShape[] {
-  return editor.getCurrentPageShapes().map((shape) => {
-    const props = shape.props as Record<string, unknown>
-    let text = ''
-    const rawText = props.text ?? props.richText
-    if (typeof rawText === 'string') {
-      text = rawText
-    } else if (rawText && typeof rawText === 'object' && 'content' in rawText) {
-      const doc = rawText as { content?: Array<{ content?: Array<{ text?: string }> }> }
-      text = (doc.content ?? [])
-        .map((p) => (p.content ?? []).map((leaf) => leaf.text ?? '').join(''))
-        .join('\n')
-    }
-    return {
-      id: shape.id,
-      type: shape.type,
-      x: Math.round(shape.x),
-      y: Math.round(shape.y),
-      text,
-      color: (props.color as string) ?? '',
-      w: props.w as number | undefined,
-      h: props.h as number | undefined,
-      geo: props.geo as string | undefined,
-    }
-  })
 }
 
 function agentId(id: string): TLShapeId {
@@ -387,18 +361,28 @@ export default function AgentSidebar({ editorRef }: AgentSidebarProps) {
 
   async function handleSend() {
     const text = input.trim()
-    if (!text || loading || !editorRef.current) return
+    if (!text || loading) return
+    if (!editorRef.current) {
+      console.warn('[chat] send blocked: editor not mounted yet')
+      setMessages((prev) => [
+        ...prev,
+        { role: 'assistant', content: 'Canvas is still loading. Try again in a moment.' },
+      ])
+      return
+    }
+
+    console.info('[chat] handleSend', { textLength: text.length })
 
     setInput('')
     setMessages((prev) => [...prev, { role: 'user', content: text }])
     setLoading(true)
 
-    const canvasState = getCanvasState(editorRef.current)
+    const canvasSnapshot = getCanvasSnapshot(editorRef.current)
     let gotMessage = false
 
     await streamMessage(
       text,
-      canvasState,
+      canvasSnapshot,
       (action) => {
         if (action._type === 'message') {
           gotMessage = true

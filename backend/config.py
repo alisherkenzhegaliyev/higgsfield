@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     command_flush_delay_s: float = 3.5
     db_save_debounce_s: float = 2.0
     agent_max_turns: int = 8
+    context_debug: bool = False
 
 
 @lru_cache
