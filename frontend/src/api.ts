@@ -8,6 +8,20 @@ export type CanvasShape = {
   w?: number
   h?: number
   geo?: string
+  url?: string
+  fromId?: string
+  toId?: string
+}
+
+export type CanvasSnapshot = {
+  shapes: CanvasShape[]
+  viewport?: {
+    x: number
+    y: number
+    w: number
+    h: number
+  }
+  selected_ids?: string[]
 }
 
 // Raw action from the stream (uses _type discriminator)
@@ -20,32 +34,63 @@ export function proxyUrl(url: string): string {
   return `${API_BASE}/api/proxy-media?url=${encodeURIComponent(url)}`
 }
 
+/** Proxy an external image URL through the backend to avoid CORS. */
+export function proxyImageUrl(url: string): string {
+  return `${API_BASE}/api/proxy-image?url=${encodeURIComponent(url)}`
+}
+
 export type GenerationStatus = {
   status: string
   url?: string | null
   error?: string
 }
 
+export type MoodboardVerification = {
+  should_trigger: boolean
+  reason?: string
+  query?: string
+  trigger_message?: string
+}
+
 export async function streamMessage(
   message: string,
-  canvasState: CanvasShape[],
+  canvasSnapshot: CanvasSnapshot,
   onAction: (action: StreamAction) => void,
   onDone: () => void,
-  onError: (err: Error) => void
+  onError: (err: Error) => void,
+  roomId = 'main',
+  options?: {
+    anchorShapeId?: string
+  },
 ): Promise<void> {
   let response: Response
+  console.info('[chat] sending request', {
+    apiBase: API_BASE,
+    roomId,
+    shapes: canvasSnapshot.shapes.length,
+    selected: canvasSnapshot.selected_ids?.length ?? 0,
+    hasViewport: Boolean(canvasSnapshot.viewport),
+  })
   try {
     response = await fetch(`${API_BASE}/api/chat/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, canvas_state: canvasState }),
+      body: JSON.stringify({
+        message,
+        room_id: roomId,
+        canvas_state: canvasSnapshot.shapes,
+        canvas_snapshot: canvasSnapshot,
+        anchor_shape_id: options?.anchorShapeId,
+      }),
     })
   } catch (e) {
+    console.error('[chat] request failed before reaching backend', e)
     onError(e instanceof Error ? e : new Error('Network error'))
     return
   }
 
   if (!response.ok) {
+    console.error('[chat] backend responded with error', response.status)
     onError(new Error(`Backend error: ${response.status}`))
     return
   }
@@ -93,6 +138,28 @@ export async function streamMessage(
   }
 
   onDone()
+}
+
+export async function verifyMoodboardTrigger(
+  roomId: string,
+  shapeId: string,
+  text: string,
+): Promise<MoodboardVerification> {
+  const response = await fetch(`${API_BASE}/api/moodboard/verify`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      room_id: roomId,
+      shape_id: shapeId,
+      text,
+    }),
+  })
+
+  if (!response.ok) {
+    throw new Error(`Moodboard verify failed: ${response.status}`)
+  }
+
+  return response.json() as Promise<MoodboardVerification>
 }
 
 /** Upload a local data/blob URL image to a public host, returns a public URL. */

@@ -18,6 +18,8 @@ from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from chat_agent import router as chat_router
+from context.api import router as context_router
+from config import get_settings
 from db import init_db
 from ws_handler import handle_websocket
 
@@ -36,9 +38,6 @@ async def lifespan(app: FastAPI):
 
 from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
-from typing import Any
-from chat_streaming import stream_agent, _detect_moodboard
-from pinterest import fetch_pinterest_images
 from higgsfield import (
     submit_image_generation, submit_flux_generation,
     submit_video_generation, submit_dop_turbo_generation, submit_kling_generation,
@@ -58,11 +57,6 @@ app.add_middleware(
 _generations: dict[str, dict] = {}
 
 
-class ChatRequest(BaseModel):
-    message: str
-    canvas_state: list[dict[str, Any]] = []
-
-
 class GenerateRequest(BaseModel):
     type: str          # "image" or "video"
     prompt: str
@@ -73,23 +67,6 @@ class GenerateRequest(BaseModel):
     resolution: str = "2K"    # "1K" | "2K" | "4K"
     aspect_ratio: str = "16:9"
     duration: int = 3          # seconds (video only)
-
-
-@app.post("/api/chat/stream")
-def chat_stream(body: ChatRequest):
-    pinterest_images = []
-    if _detect_moodboard(body.message):
-        pinterest_images = fetch_pinterest_images(body.message, max_results=5)
-
-    return StreamingResponse(
-        stream_agent(body.message, body.canvas_state, pinterest_images),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache, no-transform",
-            "X-Accel-Buffering": "no",
-            "Connection": "keep-alive",
-        },
-    )
 
 
 async def _poll_loop(request_id: str):
@@ -316,6 +293,7 @@ async def upload_image(request: Request):
             headers=cors,
         )
 app.include_router(chat_router)
+app.include_router(context_router)
 
 
 @app.websocket("/ws/{room_id}/{username}")

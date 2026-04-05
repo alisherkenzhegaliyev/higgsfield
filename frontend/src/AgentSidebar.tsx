@@ -1,43 +1,22 @@
 import { MutableRefObject, useState, useRef, useEffect, KeyboardEvent } from 'react'
 import { Editor, createShapeId, TLShapeId, toRichText, AssetRecordType } from 'tldraw'
 import { Send, Paperclip, Lock } from 'lucide-react'
-import { streamMessage, startGeneration, proxyUrl, StreamAction, CanvasShape } from './api'
+import { streamMessage, startGeneration, proxyImageUrl, proxyUrl, StreamAction } from './api'
+import { getCanvasSnapshot } from './canvasUtils'
 import { useGenerationContext, GenerationSettings } from './GenerationContext'
 
 interface AgentSidebarProps {
   editorRef: MutableRefObject<Editor | null>
+  externalNotice?: {
+    id: string
+    content: string
+  } | null
+  onExternalNoticeConsumed?: (id: string) => void
 }
 
 type ChatMessage = {
   role: 'user' | 'assistant'
   content: string
-}
-
-function getCanvasState(editor: Editor): CanvasShape[] {
-  return editor.getCurrentPageShapes().map((shape) => {
-    const props = shape.props as Record<string, unknown>
-    let text = ''
-    const rawText = props.text ?? props.richText
-    if (typeof rawText === 'string') {
-      text = rawText
-    } else if (rawText && typeof rawText === 'object' && 'content' in rawText) {
-      const doc = rawText as { content?: Array<{ content?: Array<{ text?: string }> }> }
-      text = (doc.content ?? [])
-        .map((p) => (p.content ?? []).map((leaf) => leaf.text ?? '').join(''))
-        .join('\n')
-    }
-    return {
-      id: shape.id,
-      type: shape.type,
-      x: Math.round(shape.x),
-      y: Math.round(shape.y),
-      text,
-      color: (props.color as string) ?? '',
-      w: props.w as number | undefined,
-      h: props.h as number | undefined,
-      geo: props.geo as string | undefined,
-    }
-  })
 }
 
 function agentId(id: string): TLShapeId {
@@ -159,6 +138,49 @@ export function applyAction(
         color: ((action.color as string) ?? 'black') as any,
         size: 'm' as const,
         autoSize: true,
+      },
+    }])
+
+  } else if (t === 'create_image') {
+    const url = (action.url as string) ?? ''
+    if (!url) return
+
+    const id = action.shapeId ? agentId(action.shapeId as string) : createShapeId()
+    const x = (action.x as number) ?? 200
+    const y = (action.y as number) ?? 200
+    const w = (action.w as number) ?? 300
+    const h = (action.h as number) ?? 200
+    const assetId = AssetRecordType.createId()
+
+    editor.createAssets([{
+      type: 'image',
+      id: assetId,
+      typeName: 'asset',
+      props: {
+        w,
+        h,
+        name: (action.shapeId as string) ?? 'moodboard-image',
+        isAnimated: false,
+        mimeType: 'image/jpeg',
+        src: proxyImageUrl(url),
+      },
+      meta: { originalUrl: url },
+    }])
+
+    editor.createShapes([{
+      id,
+      type: 'image',
+      x,
+      y,
+      props: {
+        w,
+        h,
+        assetId,
+        playing: false,
+        url: '',
+        crop: null,
+        flipX: false,
+        flipY: false,
       },
     }])
 
@@ -368,7 +390,11 @@ export function applyAction(
   // 'message' is handled in the sidebar
 }
 
-export default function AgentSidebar({ editorRef }: AgentSidebarProps) {
+export default function AgentSidebar({
+  editorRef,
+  externalNotice = null,
+  onExternalNoticeConsumed,
+}: AgentSidebarProps) {
   const { onGenerationComplete, onThinkingStart, onThinkingEnd, settings } = useGenerationContext()
   const aiCircleRef = useRef<TLShapeId | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([
@@ -385,20 +411,37 @@ export default function AgentSidebar({ editorRef }: AgentSidebarProps) {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
   }, [messages])
 
+  useEffect(() => {
+    if (!externalNotice) return
+
+    setMessages((prev) => [...prev, { role: 'assistant', content: externalNotice.content }])
+    onExternalNoticeConsumed?.(externalNotice.id)
+  }, [externalNotice, onExternalNoticeConsumed])
+
   async function handleSend() {
     const text = input.trim()
-    if (!text || loading || !editorRef.current) return
+    if (!text || loading) return
+    if (!editorRef.current) {
+      console.warn('[chat] send blocked: editor not mounted yet')
+      setMessages((prev) => [
+        ...prev,
+        { role: 'assistant', content: 'Canvas is still loading. Try again in a moment.' },
+      ])
+      return
+    }
+
+    console.info('[chat] handleSend', { textLength: text.length })
 
     setInput('')
     setMessages((prev) => [...prev, { role: 'user', content: text }])
     setLoading(true)
 
-    const canvasState = getCanvasState(editorRef.current)
+    const canvasSnapshot = getCanvasSnapshot(editorRef.current)
     let gotMessage = false
 
     await streamMessage(
       text,
-      canvasState,
+      canvasSnapshot,
       (action) => {
         if (action._type === 'message') {
           gotMessage = true

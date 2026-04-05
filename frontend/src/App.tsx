@@ -13,8 +13,8 @@ import {
   DEFAULT_SETTINGS,
 } from './GenerationContext'
 import { useVoiceChat, VoiceChatCallbacks } from './useVoiceChat'
-import { getCanvasState } from './canvasUtils'
-import { StreamAction, proxyUrl } from './api'
+import { getCanvasSnapshot, getCanvasState } from './canvasUtils'
+import { streamMessage, StreamAction, proxyUrl, verifyMoodboardTrigger } from './api'
 import { CursorContext } from './CursorContext'
 
 const ADJECTIVES = ['Quick', 'Bold', 'Calm', 'Dark', 'Free', 'Sharp', 'Wild', 'Cool', 'Swift', 'Bright']
@@ -36,6 +36,9 @@ export default function App() {
   const editorRef = useRef<Editor | null>(null)
   const username = useMemo(() => getOrCreateUsername(), [])
   const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [agentNotices, setAgentNotices] = useState<Array<{ id: string; content: string }>>([])
+  const agentNoticeSeqRef = useRef(0)
+  const roomId = 'main'
 
   // ── Generation state ─────────────────────────────────────────────────────────
   const [pendingGenerations, setPendingGenerations] = useState<PendingGeneration[]>([])
@@ -67,6 +70,8 @@ export default function App() {
     editorRef.current?.deleteShapes([shapeId as TLShapeId])
     setPendingGenerations((prev) => prev.filter((g) => g.shapeId !== shapeId))
   }, [])
+
+  const isApplyingRemoteRef = useRef(false)
 
   // ── Voice agent: generate_complete handler ───────────────────────────────────
   const handleGenerateComplete = useCallback(
@@ -123,7 +128,70 @@ export default function App() {
     [handleGenerateComplete, onGenerationComplete, onThinkingStart, onThinkingEnd, settings],
   )
 
-  const isApplyingRemoteRef = useRef(false)
+  const autoMoodboardInFlightRef = useRef<Set<string>>(new Set())
+
+  const enqueueAgentNotice = useCallback((content: string) => {
+    agentNoticeSeqRef.current += 1
+    setAgentNotices((prev) => [
+      ...prev,
+      { id: `agent-notice-${agentNoticeSeqRef.current}`, content },
+    ])
+  }, [])
+
+  const handleAgentNoticeConsumed = useCallback((id: string) => {
+    setAgentNotices((prev) => prev.filter((notice) => notice.id !== id))
+  }, [])
+
+  const triggerAutoMoodboard = useCallback(
+    async (shapeId: string) => {
+      const editor = editorRef.current
+      if (!editor || isApplyingRemoteRef.current || autoMoodboardInFlightRef.current.has(shapeId)) {
+        return
+      }
+
+      const note = getCanvasState(editor).find((shape) => shape.id === shapeId && shape.type === 'note')
+      const text = note?.text.trim()
+      if (!text) return
+
+      autoMoodboardInFlightRef.current.add(shapeId)
+      try {
+        const verification = await verifyMoodboardTrigger(roomId, shapeId, text)
+        if (!verification.should_trigger || !verification.trigger_message) {
+          return
+        }
+
+        const detectedQuery = verification.query?.trim()
+        enqueueAgentNotice(
+          detectedQuery
+            ? `Detected a moodboard request for "${detectedQuery}". Starting the moodboard now.`
+            : 'Detected a moodboard request. Starting the moodboard now.',
+        )
+
+        const snapshot = getCanvasSnapshot(editor)
+        await streamMessage(
+          verification.trigger_message,
+          snapshot,
+          (action) => {
+            if (action._type === 'message') return
+            const liveEditor = editorRef.current
+            if (!liveEditor) return
+            applyAction(liveEditor, action, onGenerationComplete, onThinkingStart, onThinkingEnd, settings)
+          },
+          () => {},
+          (err) => {
+            console.error('[moodboard] auto trigger failed', err)
+          },
+          roomId,
+          { anchorShapeId: shapeId },
+        )
+      } catch (err) {
+        console.error('[moodboard] verification failed', err)
+      } finally {
+        autoMoodboardInFlightRef.current.delete(shapeId)
+      }
+    },
+    [enqueueAgentNotice, onGenerationComplete, onThinkingStart, onThinkingEnd, roomId, settings],
+  )
 
   const handleCanvasRestoreFull = useCallback((snapshot: unknown) => {
     if (editorRef.current && snapshot) {
@@ -180,6 +248,47 @@ export default function App() {
     return () => window.removeEventListener('pointermove', handlePointerMove)
   }, [isConnected, sendWsMessage])
 
+  const lastEditingShapeIdRef = useRef<TLShapeId | null>(null)
+  const moodboardCleanupRef = useRef<(() => void) | null>(null)
+  useEffect(() => {
+    const moodboardTimers = new Set<ReturnType<typeof setTimeout>>()
+
+    function handleStoreUpdate() {
+      if (!editorRef.current || isApplyingRemoteRef.current) return
+
+      const editingShapeId = editorRef.current.getEditingShapeId()
+      const previousEditingShapeId = lastEditingShapeIdRef.current
+      if (previousEditingShapeId && previousEditingShapeId !== editingShapeId) {
+        const editedShape = editorRef.current.getShape(previousEditingShapeId)
+        if (editedShape?.type === 'note') {
+          const timer = setTimeout(() => {
+            moodboardTimers.delete(timer)
+            void triggerAutoMoodboard(String(previousEditingShapeId))
+          }, 150)
+          moodboardTimers.add(timer)
+        }
+      }
+      lastEditingShapeIdRef.current = editingShapeId
+    }
+
+    const pollInterval = setInterval(() => {
+      if (!editorRef.current) return
+      clearInterval(pollInterval)
+      const unsubscribe = editorRef.current.store.listen(handleStoreUpdate)
+      moodboardCleanupRef.current = () => {
+        unsubscribe()
+        for (const timer of moodboardTimers) clearTimeout(timer)
+        moodboardTimers.clear()
+      }
+    }, 100)
+
+    return () => {
+      clearInterval(pollInterval)
+      moodboardCleanupRef.current?.()
+      moodboardCleanupRef.current = null
+    }
+  }, [triggerAutoMoodboard])
+
   // ── Canvas sync: debounced store listener ────────────────────────────────────
   const storeCleanupRef = useRef<(() => void) | null>(null)
   useEffect(() => {
@@ -187,7 +296,8 @@ export default function App() {
     let timer: ReturnType<typeof setTimeout>
 
     function syncCanvas() {
-      if (isApplyingRemoteRef.current) return
+      if (!editorRef.current || isApplyingRemoteRef.current) return
+
       clearTimeout(timer)
       timer = setTimeout(() => {
         if (!editorRef.current || isApplyingRemoteRef.current) return
@@ -262,7 +372,11 @@ export default function App() {
               </PanelResizeHandle>
 
               <Panel defaultSize={32} minSize={8} collapsible>
-                <AgentSidebar editorRef={editorRef} />
+                <AgentSidebar
+                  editorRef={editorRef}
+                  externalNotice={agentNotices[0] ?? null}
+                  onExternalNoticeConsumed={handleAgentNoticeConsumed}
+                />
               </Panel>
             </PanelGroup>
           </div>
