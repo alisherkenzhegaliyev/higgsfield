@@ -70,9 +70,7 @@ export function useVoiceChat(
   const recorderRef = useRef<MediaRecorder | null>(null)
   const isMutedRef = useRef(false)
   const iceServersRef = useRef<RTCIceServer[]>(FALLBACK_ICE)
-  const audioCtxRef = useRef<AudioContext | null>(null)
-  const nextPlayTimeRef = useRef(0)
-  const livekitRoomRef = useRef<any>(null)
+const livekitRoomRef = useRef<any>(null)
   const speakingTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
   // Keep callbacks in a ref so the WS onmessage closure always sees the latest version.
   const callbacksRef = useRef(callbacks)
@@ -235,39 +233,6 @@ export function useVoiceChat(
     startNewChunk()
   }, [])
 
-  // --- WebSocket audio relay (bypasses WebRTC, works across any network) ---
-  const startRelayRecorder = useCallback((stream: MediaStream, ws: WebSocket) => {
-    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-      ? 'audio/webm;codecs=opus'
-      : 'audio/webm'
-
-    const recorder = new MediaRecorder(stream, { mimeType })
-    let initChunk: Uint8Array | null = null
-    let chunkIndex = 0
-
-    recorder.ondataavailable = (e) => {
-      if (e.data.size < 10 || ws.readyState !== WebSocket.OPEN) return
-      e.data.arrayBuffer().then((buf) => {
-        const bytes = new Uint8Array(buf)
-        if (chunkIndex === 0) {
-          initChunk = bytes // first chunk contains the WebM header
-        }
-        chunkIndex++
-        if (isMutedRef.current) return
-
-        // Prepend init segment so every chunk is independently decodable
-        const playable = chunkIndex === 1 || !initChunk
-          ? bytes
-          : new Uint8Array([...initChunk, ...bytes])
-
-        let bin = ''
-        playable.forEach((b) => (bin += String.fromCharCode(b)))
-        ws.send(JSON.stringify({ type: 'audio_relay', data: btoa(bin) }))
-      })
-    }
-
-    recorder.start(100) // 100ms timeslice
-  }, [])
 
   // --- Main WS + setup effect ---
 
@@ -297,7 +262,7 @@ export function useVoiceChat(
         if (!cancelled) {
           setIsConnected(true)
           startRecorder(stream)
-          startRelayRecorder(stream, ws)
+          // audio_relay disabled — LiveKit handles peer audio
         }
       }
 
@@ -359,29 +324,6 @@ export function useVoiceChat(
           setIsListenerActive(true)
           callbacksRef.current.onAgentAction(msg.action as StreamAction)
           setTimeout(() => setIsListenerActive(false), 2000)
-        } else if (t === 'audio_relay') {
-          try {
-            const bin = atob(msg.data as string)
-            const bytes = new Uint8Array(bin.length)
-            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
-
-            if (!audioCtxRef.current) {
-              audioCtxRef.current = new AudioContext({ latencyHint: 'interactive' })
-            }
-            const ctx = audioCtxRef.current
-            if (ctx.state === 'suspended') ctx.resume()
-
-            ctx.decodeAudioData(bytes.buffer.slice(0), (buffer) => {
-              const source = ctx.createBufferSource()
-              source.buffer = buffer
-              source.connect(ctx.destination)
-              const now = ctx.currentTime
-              // Schedule back-to-back; catch up immediately if we fall behind
-              const startAt = Math.max(now + 0.01, nextPlayTimeRef.current)
-              source.start(startAt)
-              nextPlayTimeRef.current = startAt + buffer.duration
-            })
-          } catch {}
         } else if (t === 'cursor_move') {
           setCursors((prev) => ({ ...prev, [msg.username as string]: { x: msg.x as number, y: msg.y as number } }))
         } else if (t === 'user_left') {
