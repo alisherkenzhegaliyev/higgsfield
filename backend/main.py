@@ -22,6 +22,7 @@ from context.api import router as context_router
 from config import get_settings
 from db import init_db
 from ws_handler import handle_websocket
+from image_utils import preprocess_image as _preprocess_image, upload_to_public_host as _upload_to_public_host
 
 logging.basicConfig(
     level=logging.INFO,
@@ -218,48 +219,6 @@ async def proxy_media(url: str):
         return Response(content=str(e).encode(), status_code=502, headers=cors)
 
 
-def _preprocess_image(image_bytes: bytes) -> tuple[bytes, str, str]:
-    """Resize to max 1920px, strip alpha, convert to JPEG — ensures model compatibility."""
-    img = Image.open(io.BytesIO(image_bytes))
-    img = img.convert("RGB")  # remove alpha channel (PNG transparency)
-    if img.width > 1920 or img.height > 1920:
-        img.thumbnail((1920, 1920), Image.LANCZOS)
-    out = io.BytesIO()
-    img.save(out, format="JPEG", quality=92)
-    return out.getvalue(), "image/jpeg", "jpg"
-
-
-async def _upload_to_public_host(image_bytes: bytes, mime: str, ext: str) -> str:
-    """Try catbox.moe then transfer.sh. Returns public URL or raises."""
-    filename = f"image.{ext}"
-    async with httpx.AsyncClient(timeout=30) as client:
-        # 1. catbox.moe — permanent, no auth needed
-        try:
-            res = await client.post(
-                "https://catbox.moe/user/api.php",
-                data={"reqtype": "fileupload"},
-                files={"fileToUpload": (filename, image_bytes, mime)},
-            )
-            if res.status_code == 200 and res.text.strip().startswith("https://"):
-                return res.text.strip()
-            print(f"[upload] catbox.moe failed ({res.status_code}): {res.text[:100]}")
-        except Exception as e:
-            print(f"[upload] catbox.moe error: {e}")
-
-        # 2. transfer.sh — fallback
-        try:
-            res = await client.put(
-                f"https://transfer.sh/{filename}",
-                content=image_bytes,
-                headers={"Content-Type": mime, "Max-Days": "1"},
-            )
-            if res.status_code == 200 and res.text.strip().startswith("https://"):
-                return res.text.strip()
-            print(f"[upload] transfer.sh failed ({res.status_code}): {res.text[:100]}")
-        except Exception as e:
-            print(f"[upload] transfer.sh error: {e}")
-
-    raise RuntimeError("All upload services failed")
 
 
 @app.post("/api/upload-image")

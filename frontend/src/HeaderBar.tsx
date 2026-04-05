@@ -52,10 +52,10 @@ export default function HeaderBar({
               <div key={u.username} className="relative">
                 <div
                   className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold border-2 border-card"
-                  style={{ backgroundColor: USER_COLORS[i % USER_COLORS.length] }}
+                  style={{ backgroundColor: u.isAI ? 'hsl(270,70%,55%)' : USER_COLORS[i % USER_COLORS.length] }}
                 >
                   <span className="text-[11px] font-bold" style={{ color: '#0a0a0f' }}>
-                    {u.username[0].toUpperCase()}
+                    {u.isAI ? '✦' : u.username[0].toUpperCase()}
                   </span>
                 </div>
                 {u.speaking && (

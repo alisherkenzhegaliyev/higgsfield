@@ -1,9 +1,9 @@
-import { useRef, useEffect, useState } from 'react'
+import { useRef, useEffect, useState, ChangeEvent } from 'react'
 import {
   Mic, MicOff, ChevronDown, ChevronUp,
-  Video, VideoOff, Volume2, PhoneOff, Send, Plus,
+  Video, VideoOff, Volume2, PhoneOff, Send, ImagePlus,
 } from 'lucide-react'
-import { VoiceUser, TranscriptEntry } from './useVoiceChat'
+import { VoiceUser, TranscriptEntry, ChatMessage } from './useVoiceChat'
 import { GenerationSettings } from './GenerationContext'
 
 const USER_COLORS = [
@@ -13,17 +13,13 @@ const USER_COLORS = [
   'hsl(260,70%,60%)',
   'hsl(340,80%,60%)',
 ]
-
-interface ChatMessage {
-  id: number
-  username: string
-  text: string
-  time: string
-}
+const AI_COLOR = 'hsl(270,70%,55%)'
 
 interface VoiceChatProps {
   users: VoiceUser[]
   transcripts: TranscriptEntry[]
+  chatMessages: ChatMessage[]
+  sendChatMessage: (content: string, msgType?: 'text' | 'image') => void
   isMuted: boolean
   isConnected: boolean
   isListenerActive: boolean
@@ -33,13 +29,16 @@ interface VoiceChatProps {
   setSettings: (patch: Partial<GenerationSettings>) => void
 }
 
-function formatTime(d: Date) {
+function formatTime(ts: number) {
+  const d = new Date(ts)
   return d.getHours().toString().padStart(2, '0') + ':' + d.getMinutes().toString().padStart(2, '0')
 }
 
 export default function VoiceChat({
   users,
   transcripts,
+  chatMessages,
+  sendChatMessage,
   isMuted,
   isConnected,
   isListenerActive,
@@ -50,10 +49,10 @@ export default function VoiceChat({
 }: VoiceChatProps) {
   const transcriptRef = useRef<HTMLDivElement>(null)
   const chatEndRef = useRef<HTMLDivElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const [transcriptExpanded, setTranscriptExpanded] = useState(false)
   const [settingsExpanded, setSettingsExpanded] = useState(false)
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
   const [chatInput, setChatInput] = useState('')
   const [isCameraOn, setIsCameraOn] = useState(false)
 
@@ -72,11 +71,24 @@ export default function VoiceChat({
   function sendChat() {
     const text = chatInput.trim()
     if (!text) return
-    setChatMessages((prev) => [
-      ...prev,
-      { id: Date.now(), username, text, time: formatTime(new Date()) },
-    ])
+    sendChatMessage(text, 'text')
     setChatInput('')
+  }
+
+  function handleImageSelect(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    if (file.size > 2 * 1024 * 1024) {
+      alert('Image too large — max 2 MB')
+      return
+    }
+    const reader = new FileReader()
+    reader.onloadend = () => {
+      sendChatMessage(reader.result as string, 'image')
+    }
+    reader.readAsDataURL(file)
+    // Reset so the same file can be sent again
+    e.target.value = ''
   }
 
   return (
@@ -107,9 +119,11 @@ export default function VoiceChat({
                     className={`w-14 h-14 rounded-full flex items-center justify-center text-base font-bold transition-shadow ${
                       u.speaking ? 'shadow-[0_0_0_3px_hsl(142,70%,50%)]' : ''
                     }`}
-                    style={{ backgroundColor: USER_COLORS[i % USER_COLORS.length] }}
+                    style={{ backgroundColor: u.isAI ? AI_COLOR : USER_COLORS[i % USER_COLORS.length] }}
                   >
-                    <span style={{ color: '#0a0a0f' }}>{u.username[0].toUpperCase()}</span>
+                    <span style={{ color: '#0a0a0f' }}>
+                      {u.isAI ? '✦' : u.username[0].toUpperCase()}
+                    </span>
                   </div>
                   {/* Muted badge */}
                   {isMuted && u.username === username && (
@@ -117,9 +131,13 @@ export default function VoiceChat({
                       <MicOff className="w-2.5 h-2.5 text-destructive" />
                     </span>
                   )}
+                  {/* AI pulse indicator */}
+                  {u.isAI && (
+                    <span className="absolute bottom-0 right-0 w-3.5 h-3.5 rounded-full border-2 border-card bg-[hsl(270,70%,55%)] animate-pulse" />
+                  )}
                 </div>
                 <span className="text-[10px] text-muted-foreground max-w-[64px] truncate text-center">
-                  {u.username === username ? 'You' : u.username.split(' ')[0]}
+                  {u.isAI ? 'Higgs AI' : (u.username === username ? 'You' : u.username.split(' ')[0])}
                 </span>
               </div>
             ))
@@ -217,7 +235,7 @@ export default function VoiceChat({
       {/* ── Chat ───────────────────────────────────────────────── */}
       <div className="flex-1 flex flex-col min-h-0 border-b border-border">
         <div className="px-4 py-2 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider shrink-0">
-          Chat
+          Team Chat
         </div>
 
         {/* Messages */}
@@ -227,22 +245,38 @@ export default function VoiceChat({
           ) : (
             chatMessages.map((msg) => {
               const isMe = msg.username === username
+              const isAI = msg.isAI
               return (
                 <div key={msg.id} className={`flex flex-col gap-0.5 ${isMe ? 'items-end' : 'items-start'}`}>
                   {!isMe && (
-                    <span className="text-[10px] text-muted-foreground px-1">{msg.username.split(' ')[0]}</span>
+                    <span
+                      className="text-[10px] px-1 font-semibold"
+                      style={{ color: isAI ? AI_COLOR : 'hsl(var(--muted-foreground))' }}
+                    >
+                      {isAI ? '✦ Higgs AI' : msg.username.split(' ')[0]}
+                    </span>
                   )}
                   <div className={`flex items-end gap-1.5 ${isMe ? 'flex-row-reverse' : ''}`}>
-                    <div
-                      className={`max-w-[200px] px-3 py-2 rounded-2xl text-xs leading-relaxed break-words ${
-                        isMe
-                          ? 'bg-ai-border/20 text-foreground rounded-tr-sm'
-                          : 'bg-secondary text-secondary-foreground rounded-tl-sm'
-                      }`}
-                    >
-                      {msg.text}
-                    </div>
-                    <span className="text-[9px] text-muted-foreground shrink-0">{msg.time}</span>
+                    {msg.msgType === 'image' ? (
+                      <img
+                        src={msg.content}
+                        alt="shared"
+                        className="max-w-[200px] max-h-[200px] rounded-xl object-cover"
+                      />
+                    ) : (
+                      <div
+                        className={`max-w-[200px] px-3 py-2 rounded-2xl text-xs leading-relaxed break-words ${
+                          isAI
+                            ? 'bg-[hsl(270,70%,55%)]/15 text-foreground border border-[hsl(270,70%,55%)]/30 rounded-tl-sm'
+                            : isMe
+                            ? 'bg-ai-border/20 text-foreground rounded-tr-sm'
+                            : 'bg-secondary text-secondary-foreground rounded-tl-sm'
+                        }`}
+                      >
+                        {msg.content}
+                      </div>
+                    )}
+                    <span className="text-[9px] text-muted-foreground shrink-0">{formatTime(msg.ts)}</span>
                   </div>
                 </div>
               )
@@ -253,15 +287,28 @@ export default function VoiceChat({
 
         {/* Input */}
         <div className="shrink-0 px-3 py-2 flex items-center gap-2">
-          <button className="text-muted-foreground hover:text-secondary-foreground transition-colors">
-            <Plus className="w-4 h-4" />
+          {/* Image upload button */}
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            title="Attach image"
+            className="text-muted-foreground hover:text-secondary-foreground transition-colors"
+          >
+            <ImagePlus className="w-4 h-4" />
           </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={handleImageSelect}
+          />
+
           <input
             type="text"
             value={chatInput}
             onChange={(e) => setChatInput(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && sendChat()}
-            placeholder="Type Something"
+            placeholder="Type something…"
             className="flex-1 bg-transparent text-xs text-foreground placeholder:text-muted-foreground outline-none"
           />
           <button

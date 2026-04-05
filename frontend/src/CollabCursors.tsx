@@ -2,6 +2,7 @@ import { useEditor } from 'tldraw'
 import { useCursors } from './CursorContext'
 
 const COLORS = ['#e84393', '#7c3aed', '#2563eb', '#059669', '#d97706', '#dc2626']
+const AI_CURSOR_COLOR = '#9333ea'
 
 function userColor(username: string): string {
   let hash = 0
@@ -17,7 +18,8 @@ export default function CollabCursors() {
     <>
       {Object.entries(cursors).map(([username, { x, y }]) => {
         const vp = editor.pageToViewport({ x, y })
-        const color = userColor(username)
+        const isAI = username === 'Higgs AI'
+        const color = isAI ? AI_CURSOR_COLOR : userColor(username)
         return (
           <div
             key={username}
@@ -30,15 +32,29 @@ export default function CollabCursors() {
               transform: 'translate(0, 0)',
             }}
           >
-            <svg width="20" height="20" viewBox="0 0 20 20" style={{ display: 'block' }}>
-              <path
-                d="M4 1l13 7.5-7 1.5-3 6z"
-                fill={color}
-                stroke="white"
-                strokeWidth="1.2"
-                strokeLinejoin="round"
-              />
-            </svg>
+            {isAI ? (
+              /* Diamond cursor for AI */
+              <svg width="22" height="22" viewBox="0 0 22 22" style={{ display: 'block' }}>
+                <polygon
+                  points="11,2 20,11 11,20 2,11"
+                  fill={color}
+                  stroke="white"
+                  strokeWidth="1.5"
+                  strokeLinejoin="round"
+                />
+                <text x="11" y="15" textAnchor="middle" fontSize="8" fill="white" fontWeight="bold">✦</text>
+              </svg>
+            ) : (
+              <svg width="20" height="20" viewBox="0 0 20 20" style={{ display: 'block' }}>
+                <path
+                  d="M4 1l13 7.5-7 1.5-3 6z"
+                  fill={color}
+                  stroke="white"
+                  strokeWidth="1.2"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            )}
             <div
               style={{
                 background: color,
@@ -51,9 +67,10 @@ export default function CollabCursors() {
                 whiteSpace: 'nowrap',
                 marginTop: 2,
                 boxShadow: '0 1px 4px rgba(0,0,0,0.3)',
+                ...(isAI ? { animation: 'pulse 2s cubic-bezier(0.4,0,0.6,1) infinite' } : {}),
               }}
             >
-              {username}
+              {isAI ? '✦ Higgs AI' : username}
             </div>
           </div>
         )

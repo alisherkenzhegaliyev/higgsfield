@@ -230,7 +230,7 @@ export default function App() {
     [handleAgentAction, handleCanvasRestoreFull, handleCanvasSnapshot],
   )
 
-  const { users, transcripts, cursors, isMuted, isConnected, isListenerActive, toggleMute, sendWsMessage } =
+  const { users, transcripts, cursors, chatMessages, isMuted, isConnected, isListenerActive, toggleMute, sendWsMessage, sendChatMessage } =
     useVoiceChat('main', username, callbacks)
 
   // ── Cursor tracking ──────────────────────────────────────────────────────────
@@ -391,6 +391,8 @@ export default function App() {
               <VoiceChat
                 users={users}
                 transcripts={transcripts}
+                chatMessages={chatMessages}
+                sendChatMessage={sendChatMessage}
                 isMuted={isMuted}
                 isConnected={isConnected}
                 isListenerActive={isListenerActive}

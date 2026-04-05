@@ -4,12 +4,22 @@ import { StreamAction } from './api'
 export type VoiceUser = {
   username: string
   speaking: boolean
+  isAI?: boolean
 }
 
 export type TranscriptEntry = {
   username: string
   text: string
   ts: number
+}
+
+export type ChatMessage = {
+  id: string
+  username: string
+  content: string
+  msgType: 'text' | 'image'
+  ts: number
+  isAI?: boolean
 }
 
 export type VoiceChatCallbacks = {
@@ -24,11 +34,13 @@ type UseVoiceChatReturn = {
   users: VoiceUser[]
   transcripts: TranscriptEntry[]
   cursors: Record<string, CursorEntry>
+  chatMessages: ChatMessage[]
   isMuted: boolean
   isConnected: boolean
   isListenerActive: boolean
   toggleMute: () => void
   sendWsMessage: (msg: Record<string, unknown>) => void
+  sendChatMessage: (content: string, msgType?: 'text' | 'image') => void
 }
 
 const _API_BASE = (import.meta.env.VITE_API_URL ?? '').replace(/\/$/, '')
@@ -59,6 +71,7 @@ export function useVoiceChat(
   const [users, setUsers] = useState<VoiceUser[]>([])
   const [transcripts, setTranscripts] = useState<TranscriptEntry[]>([])
   const [cursors, setCursors] = useState<Record<string, CursorEntry>>({})
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
   const [isMuted, setIsMuted] = useState(false)
   const [isConnected, setIsConnected] = useState(false)
   const [isListenerActive, setIsListenerActive] = useState(false)
@@ -108,6 +121,10 @@ export function useVoiceChat(
       wsRef.current.send(JSON.stringify(msg))
     }
   }, [])
+
+  const sendChatMessage = useCallback((content: string, msgType: 'text' | 'image' = 'text') => {
+    sendWsMessage({ type: 'chat_message', content, msgType, ts: Date.now() })
+  }, [sendWsMessage])
 
   // --- WebRTC helpers ---
 
@@ -318,9 +335,10 @@ export function useVoiceChat(
         const t = msg.type
 
         if (t === 'room_update') {
-          const incoming: VoiceUser[] = (msg.users as { username: string }[]).map((u) => ({
+          const incoming: VoiceUser[] = (msg.users as { username: string; isAI?: boolean }[]).map((u) => ({
             username: u.username,
             speaking: false,
+            isAI: u.isAI ?? false,
           }))
           setUsers(incoming)
         } else if (t === 'existing_peers') {
@@ -382,6 +400,18 @@ export function useVoiceChat(
               nextPlayTimeRef.current = startAt + buffer.duration
             })
           } catch {}
+        } else if (t === 'chat_message') {
+          setChatMessages((prev) => [
+            ...prev.slice(-199),
+            {
+              id: crypto.randomUUID(),
+              username: msg.username as string,
+              content: msg.content as string,
+              msgType: (msg.msgType as 'text' | 'image') ?? 'text',
+              ts: msg.ts as number,
+              isAI: (msg.isAI as boolean) ?? false,
+            },
+          ])
         } else if (t === 'cursor_move') {
           setCursors((prev) => ({ ...prev, [msg.username as string]: { x: msg.x as number, y: msg.y as number } }))
         } else if (t === 'user_left') {
@@ -444,5 +474,5 @@ export function useVoiceChat(
     livekitRoomRef.current?.localParticipant.setMicrophoneEnabled(!next)
   }, [])
 
-  return { users, transcripts, cursors, isMuted, isConnected, isListenerActive, toggleMute, sendWsMessage }
+  return { users, transcripts, cursors, chatMessages, isMuted, isConnected, isListenerActive, toggleMute, sendWsMessage, sendChatMessage }
 }

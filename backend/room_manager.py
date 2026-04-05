@@ -73,6 +73,8 @@ class RoomManager:
         self._confirmations: dict[str, asyncio.Event] = {}
         # HITL: request_id → approved bool
         self._confirm_results: dict[str, bool] = {}
+        # Last image shared in team chat: room_id → {"data_url": str, "username": str}
+        self._last_chat_images: dict[str, dict] = {}
 
     # ------------------------------------------------------------------
     # Room lifecycle
@@ -178,7 +180,27 @@ class RoomManager:
 
     async def _broadcast_room_update(self, room_id: str) -> None:
         users = [{"username": u} for u in self._rooms.get(room_id, {})]
+        # AI agent is always present as a virtual member
+        users.append({"username": "Higgs AI", "isAI": True})
         await self.broadcast(room_id, {"type": "room_update", "users": users})
+
+    def set_last_chat_image(self, room_id: str, data_url: str, username: str) -> None:
+        self._last_chat_images[room_id] = {"data_url": data_url, "username": username}
+
+    def get_last_chat_image(self, room_id: str) -> dict | None:
+        return self._last_chat_images.get(room_id)
+
+    def clear_last_chat_image(self, room_id: str) -> None:
+        self._last_chat_images.pop(room_id, None)
+
+    async def broadcast_ai_cursor(self, room_id: str, x: float, y: float) -> None:
+        """Broadcast AI agent cursor position to all room members."""
+        await self.broadcast(room_id, {
+            "type": "cursor_move",
+            "username": "Higgs AI",
+            "x": x,
+            "y": y,
+        })
 
     # ------------------------------------------------------------------
     # Conversation buffer
