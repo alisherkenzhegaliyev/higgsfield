@@ -211,5 +211,5 @@ template
 CLAUDE.md
 
 # Node
-node_modules/
+frontend/node_modules/
 frontend/dist/
