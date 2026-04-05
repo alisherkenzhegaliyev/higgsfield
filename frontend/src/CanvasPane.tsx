@@ -26,6 +26,7 @@ export default function CanvasPane({ editorRef }: CanvasPaneProps) {
         licenseKey={import.meta.env.VITE_TLDRAW_LICENSE_KEY}
         onMount={(editor) => {
           editorRef.current = editor
+          editor.user.updateUserPreferences({ colorScheme: 'dark' })
         }}
         components={{ InFrontOfTheCanvas: CanvasOverlays }}
       />
