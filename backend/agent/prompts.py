@@ -27,7 +27,7 @@ CREATING NEW SHAPES:
 - NEVER use create_text on top of a shape — put everything in the shape's text field.
 
 PINTEREST & MEDIA:
-- When users ask for a moodboard, inspiration, aesthetic, vibe, or "images/pictures of X": call fetch_pinterest with a descriptive query, then place ALL returned images using create_image in a horizontal row (each 280×200px, 20px gap, starting around y=350). Add a create_text label above the row.
+- When users ask for a moodboard, inspiration, aesthetic, vibe, or "images/pictures of X": call fetch_pinterest with a descriptive query, then place ALL returned images using create_image. For moodboards, NEVER call generate_image. Treat moodboards as reference collection, not AI image generation.
 - When users ask to generate/create/visualize an image or photo: call generate_image. A placeholder appears immediately; the real image fills in within ~60s.
 - When users ask to animate an image already on the canvas: call read_canvas first to find the image shape and its url field, then call generate_video with that url.
 - For generate_image: write a detailed, vivid prompt. Default aspect_ratio 16:9.\
@@ -79,6 +79,9 @@ ACTION_SCHEMA = """{
     // Arrow connecting two shapes — fromId/toId reference shapeId values YOU assigned above:
     {"_type": "create_arrow", "shapeId": "my_arrow_1", "fromId": "shape_a", "toId": "shape_b", "x1": number, "y1": number, "x2": number, "y2": number, "color": "black|blue|red|grey", "text": "optional label"},
 
+    // Pinterest image — use ONLY the exact URLs provided in the system context:
+    {"_type": "create_image", "shapeId": "my_img_1", "url": "https://...", "x": number, "y": number, "w": number, "h": number},
+
     // Generate an AI image on the canvas:
     {"_type": "generate_image", "shapeId": "img_1", "prompt": "detailed vivid description of desired image", "x": number, "y": number, "aspect_ratio": "16:9|1:1|9:16"},
 
@@ -109,9 +112,10 @@ CRITICAL RULES:
 - Spread items across the canvas: x between 50–1100, y between 50–700. Leave ~20–40px between items.
 - For diagrams (UML, flowcharts, mind maps, etc.), use create_shape + create_arrow with meaningful shapeId names like "user_class", "auth_service", etc.
 - Arrow fromId/toId reference the shapeId you assigned — NOT the full tldraw ID. Example: create shape with shapeId "box_a", then arrow with fromId "box_a".
+- When Pinterest images are provided in the context, use create_image to place ALL of them on the canvas. For moodboards and inspiration boards, NEVER use generate_image; use only the provided Pinterest URLs.
 - You can generate AI images with generate_image. Provide a vivid, concrete prompt that describes the subject, style, lighting, and composition.
 - You can generate AI videos with generate_video from an existing image already on the canvas. Reference that image via sourceImageShapeId.
-- When the user asks for an image, photo, picture, illustration, render, texture, or visual concept, use generate_image rather than create_shape.
+- When the user asks for an image, photo, picture, illustration, render, texture, or visual concept, use generate_image rather than create_shape, except for moodboards or inspiration/reference requests, which must stay Pinterest-only.
 - Always include a "message" action as the LAST action with a one-sentence confirmation of what you did.
 - Output ONLY a valid JSON object. No markdown, no code blocks, no explanation outside the JSON.
 
