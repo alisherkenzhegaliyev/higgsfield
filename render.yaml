@@ -2,6 +2,7 @@ services:
   - type: web
     name: higgsfield
     runtime: python
+    pythonVersion: 3.11.0
     rootDir: backend
     buildCommand: |
       pip install -r requirements.txt &&
