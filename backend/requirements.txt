@@ -28,9 +28,9 @@ openai==2.30.0
 orjson==3.11.8
 ormsgpack==1.12.2
 packaging==26.0
-pydantic==2.12.5
+pydantic==2.10.3
 pydantic-settings==2.13.1
-pydantic_core==2.41.5
+pydantic_core==2.27.2
 python-dotenv==1.2.2
 PyYAML==6.0.3
 requests==2.32.4
