@@ -2,6 +2,7 @@ services:
   - type: web
     name: higgsfield
     runtime: python
+    pythonVersion: 3.11.0
     rootDir: backend
     buildCommand: |
       pip install -r requirements.txt &&
@@ -25,6 +26,8 @@ services:
       - key: LIVEKIT_API_SECRET
         sync: false
       - key: PUBLIC_URL
+        sync: false
+      - key: VITE_API_URL
         sync: false
       - key: VITE_TLDRAW_LICENSE_KEY
         sync: false
